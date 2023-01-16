@@ -16,7 +16,7 @@ from pydantic.error_wrappers import ValidationError
 from qrcode import QRCode
 from qrcode.constants import ERROR_CORRECT_H
 from qrcode.image.styledpil import StyledPilImage
-from websockets import connect
+# from websockets import connect as ws_connect
 from websockets.legacy.client import WebSocketClientProtocol
 
 from has_python.hive_validation import (

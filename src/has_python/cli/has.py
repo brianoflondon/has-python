@@ -1,9 +1,9 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-
+from websockets import connect as ws_connect
+import typer
 from pydantic import AnyUrl
-from websockets import connect
 
 from has_python.has import (
     HAS_SERVER,
@@ -11,6 +11,8 @@ from has_python.has import (
     HASAuthenticationRefused,
     HASAuthenticationTimeout,
 )
+
+app = typer.Typer()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,14 +23,13 @@ logging.basicConfig(
 
 
 async def connect_and_challenge(acc_name: str, has_server: AnyUrl = HAS_SERVER):
-
     has = HASAuthentication(
         hive_acc=acc_name,
         uri=has_server,
         challenge_message="Any string message goes here",
     )
     try:
-        async with connect(uri=has.uri) as websocket:
+        async with ws_connect(has.uri) as websocket:
             has.websocket = websocket
             time_to_wait = await has.connect_with_challenge()
             img = await has.get_qrcode()
@@ -48,16 +49,23 @@ async def connect_and_challenge(acc_name: str, has_server: AnyUrl = HAS_SERVER):
         logging.info("❌ Timeout Waiting for PKSA Authentication")
         pass
 
+
     return
 
 
-if __name__ == "__main__":
+
+@app.command()
+def connect(hive_account: str):
+    """Start a new connection to
+    Hive Authentication Services (HAS)
+    from the Hive Account ACC_Name"""
     try:
-        asyncio.run(connect_and_challenge("v4vapp.dev", HAS_SERVER))
-        asyncio.run(connect_and_challenge(acc_name="brianoflondon"))
+        asyncio.run(connect_and_challenge(acc_name=hive_account))
     except KeyboardInterrupt:
         logging.info("Ctrl-C pressed, bye bye!")
-
     except Exception as ex:
         logging.exception(ex)
         logging.info("Quits")
+
+if __name__ == "__main__":
+    app()

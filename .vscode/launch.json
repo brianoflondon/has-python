@@ -5,14 +5,31 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "has",
+            "type": "python",
+            "request": "launch",
+            "program": "src/has_python/cli/has.py",
+            "args": ["connect", "v4vapp.dev"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
             "name": "HAS Demo",
             "type": "python",
             "request": "launch",
             "program": "src/run_has.py",
             "console": "integratedTerminal",
             "justMyCode": true,
-            "env":{
-                "PYDEVD_DISABLE_FILE_VALIDATION":"1"
+            "env": {
+                "PYDEVD_DISABLE_FILE_VALIDATION": "1"
             }
         }
     ]

@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw, ImageFont
 from pydantic import AnyUrl, BaseModel
 from pydantic.error_wrappers import ValidationError
 from qrcode import QRCode
@@ -288,32 +289,20 @@ class HASAuthentication(BaseModel):
                 raise HASAuthenticationRefused("Integrity FAILURE")
 
     async def get_qrcode(self) -> StyledPilImage:
-        if self.qr_text:
-            folder = "/tmp/"
-            avatar_file = os.path.join(folder, f"{self.hive_acc}_avatar_temp.png")
-            # qr_file = os.path.join(folder, f"qr_{self.qr_text}.png")
-
-            # res = await get_hive_avatar_response(hive_accname)
-            # if res.status_code == 200:
-            #     # avatar_im = Image.open(BytesIO(res.content))
-            #     with open(avatar_file, "wb") as file:
-            #         file.write(res.content)
+        if qr_text := self.qr_text:
             qr = QRCode(
                 version=1,
                 error_correction=ERROR_CORRECT_H,
                 box_size=10,
-                border=1,
+                border=6,
             )
-            qr.add_data(self.qr_text)
-
-            if os.path.exists(avatar_file):
-                img = qr.make_image(
-                    image_factory=StyledPilImage, embeded_image_path=avatar_file
-                )
-            else:
-                img = qr.make_image()
-            img.show()
-            # img.save(qr_file)
+            qr.add_data(qr_text)
+            # Create a new image with a white background
+            text = str(self.auth_wait.uuid)
+            img = qr.make_image()
+            draw = ImageDraw.Draw(img)
+            font = ImageFont.truetype("arial_narrow_bold_italic.ttf", 24)
+            draw.text((100, 10), text, font=font, fill="black")
             return img
 
     async def connect_with_challenge(self):
@@ -377,7 +366,8 @@ async def hello(uri):
         async with connect(has.uri) as websocket:
             has.websocket = websocket
             time_to_wait = await has.connect_with_challenge()
-            await has.get_qrcode()
+            img = await has.get_qrcode()
+            img.show()
             logging.info(f"PKSA needs to show: {has.auth_wait.uuid}")
             logging.info(f"QR-Code as text {'*'*40} \n\n{has.qr_text}\n\n{'*'*40}")
             await has.waiting_for_challenge_response(time_to_wait)

@@ -1,7 +1,7 @@
 # has-python
 A very basic demo to show Hive Authentication Service (HAS) in Python
 
-`git clone https://github.com/brianoflondon/has-python.git .`
+`git clone https://github.com/brianoflondon/has-python.git`
 
 You'll need Poetry
 

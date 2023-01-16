@@ -5,28 +5,27 @@ import logging
 import os
 from datetime import datetime, timezone
 from enum import Enum
-from pprint import pprint
 from typing import Any
 from uuid import UUID, uuid4
 
 import requests
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw, ImageFont
+from PIL import ImageDraw, ImageFont
 from pydantic import AnyUrl, BaseModel
 from pydantic.error_wrappers import ValidationError
 from qrcode import QRCode
 from qrcode.constants import ERROR_CORRECT_H
 from qrcode.image.styledpil import StyledPilImage
-from websockets import connect
+# from websockets import connect as ws_connect
 from websockets.legacy.client import WebSocketClientProtocol
 
-from hive_validation import (
+from has_python.hive_validation import (
     SignedAnswer,
     SignedAnswerData,
     SignedAnswerVerification,
     validate_hivekeychain_ans,
 )
-from jscrypt_encode_for_python import js_decrypt, js_encrypt
+from has_python.jscrypt_encode_for_python import js_decrypt, js_encrypt
 
 # from Crypto.Cipher import AES
 
@@ -37,13 +36,6 @@ from jscrypt_encode_for_python import js_decrypt, js_encrypt
 
 
 HAS_AUTHENTICATION_TIME_LIMIT = 600
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
-    # format="{asctime} {levelname} {module} {lineno:>5} : {message}",
-    # datefmt="%Y-%m-%dT%H:%M:%S,uuu",
-)
-
 
 load_dotenv()
 
@@ -299,7 +291,7 @@ class HASAuthentication(BaseModel):
             )
             qr.add_data(qr_text)
             # Create a new image with a white background
-            text = str(self.auth_wait.uuid)
+            text = str(f"Check: {self.auth_wait.uuid} - {self.hive_acc}")
             res = requests.get(f"https://api.v4v.app/v1/hive/avatar/{self.hive_acc}")
             if res.status_code == 200:
                 # avatar_im = Image.open(BytesIO(res.content))
@@ -313,7 +305,7 @@ class HASAuthentication(BaseModel):
             else:
                 img = qr.make_image()
             draw = ImageDraw.Draw(img)
-            font = ImageFont.truetype("arial_narrow_bold_italic.ttf", 24)
+            font = ImageFont.truetype("src/has_python/arial_narrow_bold_italic.ttf", 24)
             draw.text((100, 10), text, font=font, fill="black")
             return img
 
@@ -360,50 +352,3 @@ class HASAuthentication(BaseModel):
             else:
                 logging.warning("Not successful")
                 raise HASAuthenticationRefused("Integrity good")
-
-    async def connect_with_token(self):
-        """
-        If we have an existing token, use it.
-        """
-
-
-async def hello(uri):
-
-    has = HASAuthentication(
-        hive_acc="podping",
-        uri=HAS_SERVER,
-        challenge_message="Any string message goes here",
-    )
-    try:
-        async with connect(has.uri) as websocket:
-            has.websocket = websocket
-            time_to_wait = await has.connect_with_challenge()
-            img = await has.get_qrcode()
-            img.show()
-            logging.info(f"PKSA needs to show: {has.auth_wait.uuid}")
-            logging.info(f"QR-Code as text {'*'*40} \n\n{has.qr_text}\n\n{'*'*40}")
-            await has.waiting_for_challenge_response(time_to_wait)
-
-            logging.info(has.auth_ack_data.token)
-            token_life = has.auth_ack_data.expire - datetime.now(tz=timezone.utc)
-            logging.info(f"✅ Token: ********************** | Expires in : {token_life}")
-            logging.info(has.app_session_id)
-
-    except HASAuthenticationRefused:
-        logging.info("❌ Authentication was refused")
-    except HASAuthenticationTimeout:
-        logging.info("❌ Timeout Waiting for PKSA Authentication")
-        pass
-
-    return
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(hello(HAS_SERVER))
-    except KeyboardInterrupt:
-        logging.info("Ctrl-C pressed, bye bye!")
-
-    except Exception as ex:
-        logging.exception(ex)
-        logging.info("Quits")

@@ -5,7 +5,11 @@ description = "A very basic demo to show Hive Authentication Service (HAS) in Py
 authors = ["Brian of London (Dot) <brian@v4v.app>"]
 license = "MIT"
 readme = "README.md"
-packages = [{include = "has_python"}]
+
+
+[tool.poetry.scripts]
+has = "has_python.cli.has:app"
+
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -16,6 +20,7 @@ pillow = "^9.4.0"
 pydantic = "^1.10.4"
 beem = {git = "https://gitlab.syncad.com/hive/beem.git"}
 python-dotenv = "^0.21.0"
+typer = "^0.7.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^22.12.0"

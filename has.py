@@ -53,7 +53,6 @@ HAS_APP_DATA = {
     "description": "Demo - HiveAuthService from Python",
     "icon": "https://api.v4v.app/v1/hive/avatar/v4vap",
 }
-HAS_APP_KEY = os.getenv("HAS_APP_KEY")
 HAS_AUTH_REQ_SECRET = UUID(os.getenv("HAS_AUTH_REQ_SECRET"))
 
 
@@ -370,7 +369,7 @@ class HASAuthentication(BaseModel):
 async def hello(uri):
 
     has = HASAuthentication(
-        hive_acc="v4vapp.dev",
+        hive_acc="v4vapp",
         uri=HAS_SERVER,
         challenge_message="Any string message goes here",
     )
@@ -379,7 +378,8 @@ async def hello(uri):
             has.websocket = websocket
             time_to_wait = await has.connect_with_challenge()
             await has.get_qrcode()
-            pprint(has.qr_text)
+            logging.info(f"PKSA needs to show: {has.auth_wait.uuid}")
+            logging.info(f"QR-Code as text {'*'*40} \n\n{has.qr_text}\n\n{'*'*40}")
             await has.waiting_for_challenge_response(time_to_wait)
 
             logging.info(has.auth_ack_data.token)

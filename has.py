@@ -9,6 +9,7 @@ from pprint import pprint
 from typing import Any
 from uuid import UUID, uuid4
 
+import requests
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import AnyUrl, BaseModel
@@ -37,7 +38,7 @@ from jscrypt_encode_for_python import js_decrypt, js_encrypt
 
 HAS_AUTHENTICATION_TIME_LIMIT = 600
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
     # format="{asctime} {levelname} {module} {lineno:>5} : {message}",
     # datefmt="%Y-%m-%dT%H:%M:%S,uuu",
@@ -52,15 +53,15 @@ HIVE_ACCOUNT = "v4vapp.dev"
 HAS_APP_DATA = {
     "name": "has-python",
     "description": "Demo - HiveAuthService from Python",
-    "icon": "https://api.v4v.app/v1/hive/avatar/v4vap",
+    "icon": "https://api.v4v.app/v1/hive/avatar/v4vapp",
 }
 HAS_AUTH_REQ_SECRET = UUID(os.getenv("HAS_AUTH_REQ_SECRET"))
 
 
 class HASApp(BaseModel):
-    name: str = "python-flask-demo"
-    description: str = "Demo - HiveAuth from Python"
-    icon: str = "https://api.v4v.app/v1/hive/avatar/v4vapp"
+    name: str = HAS_APP_DATA["name"]
+    description: str = HAS_APP_DATA["description"]
+    icon: str = HAS_APP_DATA["icon"]
 
 
 class KeyType(str, Enum):
@@ -299,7 +300,18 @@ class HASAuthentication(BaseModel):
             qr.add_data(qr_text)
             # Create a new image with a white background
             text = str(self.auth_wait.uuid)
-            img = qr.make_image()
+            res = requests.get(f"https://api.v4v.app/v1/hive/avatar/{self.hive_acc}")
+            if res.status_code == 200:
+                # avatar_im = Image.open(BytesIO(res.content))
+                with open(f"/tmp/{self.hive_acc}.png", "wb") as file:
+                    file.write(res.content)
+
+                img = qr.make_image(
+                    image_factory=StyledPilImage,
+                    embeded_image_path=f"/tmp/{self.hive_acc}.png",
+                )
+            else:
+                img = qr.make_image()
             draw = ImageDraw.Draw(img)
             font = ImageFont.truetype("arial_narrow_bold_italic.ttf", 24)
             draw.text((100, 10), text, font=font, fill="black")
@@ -358,7 +370,7 @@ class HASAuthentication(BaseModel):
 async def hello(uri):
 
     has = HASAuthentication(
-        hive_acc="v4vapp",
+        hive_acc="podping",
         uri=HAS_SERVER,
         challenge_message="Any string message goes here",
     )

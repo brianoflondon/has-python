@@ -8,17 +8,11 @@ from beemgraphenebase.account import PublicKey
 from beemgraphenebase.ecdsasig import verify_message
 from pydantic import BaseModel, Field
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
-    # format="{asctime} {levelname} {module} {lineno:>5} : {message}",
-    # datefmt="%Y-%m-%dT%H:%M:%S,uuu",
-)
 AUTHENTICATION_TIME_LIMIT = 60
 
 
 class SignedAnswerData(BaseModel):
-    _type: str = Field(..., alias='type')
+    _type: str = Field(..., alias="type")
     username: str
     message: str
     method: str

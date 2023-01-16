@@ -8,7 +8,7 @@
             "name": "HAS Demo",
             "type": "python",
             "request": "launch",
-            "program": "has.py",
+            "program": "src/run_has.py",
             "console": "integratedTerminal",
             "justMyCode": true,
             "env":{

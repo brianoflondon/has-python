@@ -245,6 +245,7 @@ class HASAuthentication(BaseModel):
             auth_key=js_encrypt(
                 str_bytes(data["auth_key_uuid"]), str_bytes(HAS_AUTH_REQ_SECRET)
             ),
+            **data
         )
         super().__init__(**data)
 

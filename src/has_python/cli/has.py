@@ -8,13 +8,8 @@ import typer
 from pydantic import AnyUrl
 from websockets import connect as ws_connect
 
-from has_python.has_errors import HASAuthenticationFailure, HASAuthErr
-from has_python.has_lib import (
-    HAS_SERVER,
-    HASAuthentication,
-    HASAuthenticationFailure,
-    KeyType,
-)
+from has_python.has_errors import HASAuthenticationFailure
+from has_python.has_lib import HAS_SERVER, HASAuthentication, KeyType
 
 app = typer.Typer()
 
@@ -71,6 +66,7 @@ def connect(hive_account: str, key_type: KeyType = KeyType.posting, token: str =
         asyncio.run(
             connect_and_challenge(acc_name=hive_account, key_type=key_type, token=token)
         )
+        print("all done")
     except KeyboardInterrupt:
         logging.info("Ctrl-C pressed, bye bye!")
     except Exception as ex:

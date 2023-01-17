@@ -19,8 +19,7 @@
             "program": "src/has_python/cli/has.py",
             "args": [
                 "v4vapp.dev",
-                "--token",
-                "aff86a98-9a37-4f18-ab79-7fb9c7c50a5a"
+                "--key-type", "memo"
             ],
             "console": "integratedTerminal",
             "justMyCode": true,

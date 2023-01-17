@@ -30,3 +30,11 @@ flake8 = "^6.0.0"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]
+log_level = "INFO"
+log_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
+log_date_format = "%Y-%m-%d %H:%M:%S"

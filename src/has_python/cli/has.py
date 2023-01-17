@@ -9,7 +9,12 @@ from pydantic import AnyUrl
 from websockets import connect as ws_connect
 
 from has_python.has_errors import HASAuthenticationFailure, HASAuthErr
-from has_python.has_lib import HAS_SERVER, HASAuthentication, HASAuthenticationFailure
+from has_python.has_lib import (
+    HAS_SERVER,
+    HASAuthentication,
+    HASAuthenticationFailure,
+    KeyType,
+)
 
 app = typer.Typer()
 
@@ -21,11 +26,18 @@ logging.basicConfig(
 )
 
 
-async def connect_and_challenge(acc_name: str, has_server: AnyUrl = HAS_SERVER):
+async def connect_and_challenge(
+    acc_name: str,
+    key_type: KeyType = KeyType.posting,
+    token: str = None,
+    has_server: AnyUrl = HAS_SERVER,
+):
     has = HASAuthentication(
         hive_acc=acc_name,
         uri=has_server,
         challenge_message="Any string message goes here",
+        key_type=key_type,
+        token=token,
     )
     try:
         async with ws_connect(has.uri) as websocket:
@@ -37,9 +49,10 @@ async def connect_and_challenge(acc_name: str, has_server: AnyUrl = HAS_SERVER):
             logging.info(f"QR-Code as text {'*'*40} \n\n{has.qr_text}\n\n{'*'*40}")
             await has.waiting_for_challenge_response(time_to_wait)
 
-            logging.info(f"Token: {has.auth_ack_data.token}")
             token_life = has.auth_ack_data.expire - datetime.now(tz=timezone.utc)
-            logging.info(f"✅ Token: ********************** | Expires in : {token_life}")
+            logging.info(
+                f"✅ Token: {has.auth_ack_data.token} | Expires in : {token_life}"
+            )
             logging.info(f"Session ID: {has.app_session_id}")
 
     except HASAuthenticationFailure as ex:
@@ -50,12 +63,14 @@ async def connect_and_challenge(acc_name: str, has_server: AnyUrl = HAS_SERVER):
 
 
 @app.command()
-def connect(hive_account: str):
+def connect(hive_account: str, key_type: KeyType = KeyType.posting, token: str = None):
     """Start a new connection to
     Hive Authentication Services (HAS)
     from the Hive Account ACC_Name"""
     try:
-        asyncio.run(connect_and_challenge(acc_name=hive_account))
+        asyncio.run(
+            connect_and_challenge(acc_name=hive_account, key_type=key_type, token=token)
+        )
     except KeyboardInterrupt:
         logging.info("Ctrl-C pressed, bye bye!")
     except Exception as ex:

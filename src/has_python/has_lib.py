@@ -89,6 +89,8 @@ class ChallengeHAS(BaseModel):
             data["challenge"] = json.dumps(data.get("challenge_data"), default=str)
         if not data.get("challenge"):
             raise KeyError("challenge is required")
+        if "key_type" in data.keys() and data.get("key_type") is None:
+            del data["key_type"]
         super().__init__(**data)
 
 
@@ -154,6 +156,7 @@ class AuthAckData(BaseModel):
 
 class HASAuthentication(BaseModel):
     hive_acc: str = HIVE_ACCOUNT
+    key_type: KeyType = KeyType.posting
     uri: AnyUrl = HAS_SERVER
     websocket: WebSocketClientProtocol | None
     challenge_message: str | None
@@ -216,13 +219,23 @@ class HASAuthentication(BaseModel):
         return f"has://auth_req/{auth_payload_base64}"
 
     def setup_challenge(self, **data: Any):
+        """
+        Populates the challenge data with the correct encoding and supplies
+        an encrypted one time key:
+            encrypted with this app's HAS_AUTH_REQ_SECRET
+        This is necessary if running against a PKSA service instead of an
+        interactive client (such as Hive KeyChain)
+        """
         try:
+            # NOTE: challenge_data will be converted to a challenge str
+            # Within the constructor of ChallengeHAS
             challenge = ChallengeHAS(
+                key_type=self.key_type,
                 challenge_data={
                     "timestamp": datetime.now(tz=timezone.utc).timestamp(),
                     "app_session_id": self.app_session_id,
                     "message": data.get("challenge_message"),
-                }
+                },
             )
             self.auth_data = AuthDataHAS(challenge=challenge, token=self.token)
             self.auth_req = AuthReqHAS(
@@ -302,7 +315,9 @@ class HASAuthentication(BaseModel):
             )
             qr.add_data(qr_text)
             # Create a new image with a white background
-            text = str(f"Check: {self.auth_wait.uuid} - {self.hive_acc}")
+            text = str(
+                f"Check: {self.auth_wait.uuid} - {self.hive_acc} - {self.key_type.value}"
+            )
             res = requests.get(f"https://api.v4v.app/v1/hive/avatar/{self.hive_acc}")
             if res.status_code == 200:
                 # avatar_im = Image.open(BytesIO(res.content))
@@ -345,8 +360,11 @@ class HASAuthentication(BaseModel):
         try:
             msg = await asyncio.wait_for(self.websocket.recv(), time_to_wait.seconds)
         except TimeoutError:
-            logging.warning("Timeout waiting for HAS PKSA Response")
-            raise HASAuthenticationTimeout("Timeout waiting for response")
+            self.error = HASAuthenticationFailure(
+                message="Timeout waiting for response", code=HASAuthErr.timeout
+            )
+            logging.warning(self.error.message)
+            raise self.error
 
         self.auth_ack = AuthAckNakErrHAS.parse_raw(msg)
         logging.debug(self.auth_ack)

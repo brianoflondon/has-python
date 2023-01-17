@@ -17,7 +17,11 @@
             "type": "python",
             "request": "launch",
             "program": "src/has_python/cli/has.py",
-            "args": ["brianoflondon"],
+            "args": [
+                "v4vapp.dev",
+                "--token",
+                "aff86a98-9a37-4f18-ab79-7fb9c7c50a5a"
+            ],
             "console": "integratedTerminal",
             "justMyCode": true,
             "env": {

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pydantic import AnyUrl
 from websockets import connect
 
-from has_python.has import (
+from has_python.has_lib import (
     HAS_SERVER,
     HASAuthentication,
     HASAuthenticationRefused,

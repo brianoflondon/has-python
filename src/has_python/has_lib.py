@@ -16,9 +16,9 @@ from pydantic.error_wrappers import ValidationError
 from qrcode import QRCode
 from qrcode.constants import ERROR_CORRECT_H
 from qrcode.image.styledpil import StyledPilImage
-# from websockets import connect as ws_connect
 from websockets.legacy.client import WebSocketClientProtocol
 
+from has_python.has_errors import HASAuthenticationFailure, HASAuthErr
 from has_python.hive_validation import (
     SignedAnswer,
     SignedAnswerData,
@@ -26,9 +26,6 @@ from has_python.hive_validation import (
     validate_hivekeychain_ans,
 )
 from has_python.jscrypt_encode_for_python import js_decrypt, js_encrypt
-
-# from Crypto.Cipher import AES
-
 
 # https://stackoverflow.com/questions/35472396/how-does-cryptojs-get-an-iv-when-none-is-specified
 # https://gist.github.com/tly1980/b6c2cc10bb35cb4446fb6ccf5ee5efbc
@@ -92,6 +89,8 @@ class ChallengeHAS(BaseModel):
             data["challenge"] = json.dumps(data.get("challenge_data"), default=str)
         if not data.get("challenge"):
             raise KeyError("challenge is required")
+        if "key_type" in data.keys() and data.get("key_type") is None:
+            del data["key_type"]
         super().__init__(**data)
 
 
@@ -104,14 +103,6 @@ class ChallengeAckHAS(BaseModel):
 class ChallengeAckData(BaseModel):
     pubkey: str
     challenge: str
-
-
-class HASAuthenticationRefused(Exception):
-    pass
-
-
-class HASAuthenticationTimeout(Exception):
-    pass
 
 
 class AuthDataHAS(BaseModel):
@@ -165,6 +156,7 @@ class AuthAckData(BaseModel):
 
 class HASAuthentication(BaseModel):
     hive_acc: str = HIVE_ACCOUNT
+    key_type: KeyType = KeyType.posting
     uri: AnyUrl = HAS_SERVER
     websocket: WebSocketClientProtocol | None
     challenge_message: str | None
@@ -178,6 +170,7 @@ class HASAuthentication(BaseModel):
     auth_ack: AuthAckNakErrHAS | None
     signed_answer: SignedAnswer | None
     verification: SignedAnswerVerification = False
+    error: HASAuthenticationFailure | None
     token: str | None
     expire: datetime | None
 
@@ -226,13 +219,23 @@ class HASAuthentication(BaseModel):
         return f"has://auth_req/{auth_payload_base64}"
 
     def setup_challenge(self, **data: Any):
+        """
+        Populates the challenge data with the correct encoding and supplies
+        an encrypted one time key:
+            encrypted with this app's HAS_AUTH_REQ_SECRET
+        This is necessary if running against a PKSA service instead of an
+        interactive client (such as Hive KeyChain)
+        """
         try:
+            # NOTE: challenge_data will be converted to a challenge str
+            # Within the constructor of ChallengeHAS
             challenge = ChallengeHAS(
+                key_type=self.key_type,
                 challenge_data={
                     "timestamp": datetime.now(tz=timezone.utc).timestamp(),
                     "app_session_id": self.app_session_id,
                     "message": data.get("challenge_message"),
-                }
+                },
             )
             self.auth_data = AuthDataHAS(challenge=challenge, token=self.token)
             self.auth_req = AuthReqHAS(
@@ -275,11 +278,32 @@ class HASAuthentication(BaseModel):
             )
             self.verification = validate_hivekeychain_ans(self.signed_answer)
         elif self.auth_ack.cmd == CmdType.auth_nack:
-            if self.auth_payload.uuid == self.auth_ack_data:
-                logging.info("Authentication refused: integrity good")
-            else:
-                logging.warning("Authentication refuse: integrity FAILURE")
-                raise HASAuthenticationRefused("Integrity FAILURE")
+            if self.auth_payload.uuid == self.auth_ack.uuid:
+                logging.debug("Communication with HAS integrity good")
+                if not self.auth_ack.data:
+                    self.error = HASAuthenticationFailure(
+                        message=f"No PKSA found for account {self.hive_acc}",
+                        code=HASAuthErr.no_pksa,
+                    )
+                    logging.debug(self.error.message)
+                    raise self.error
+                if (
+                    self.auth_ack.data
+                    and str(self.auth_payload.uuid) == self.auth_ack_data
+                ):
+                    self.error = HASAuthenticationFailure(
+                        message="Authentication refused: integrity GOOD",
+                        code=HASAuthErr.refused,
+                    )
+                    logging.debug(self.error.message)
+                    raise self.error
+                else:
+                    self.error = HASAuthenticationFailure(
+                        message="Authentication refused: integrity FAILURE",
+                        code=HASAuthErr.refused_bad,
+                    )
+                    logging.debug(self.error.message)
+                    raise self.error
 
     async def get_qrcode(self) -> StyledPilImage:
         if qr_text := self.qr_text:
@@ -291,7 +315,9 @@ class HASAuthentication(BaseModel):
             )
             qr.add_data(qr_text)
             # Create a new image with a white background
-            text = str(f"Check: {self.auth_wait.uuid} - {self.hive_acc}")
+            text = str(
+                f"Check: {self.auth_wait.uuid} - {self.hive_acc} - {self.key_type.value}"
+            )
             res = requests.get(f"https://api.v4v.app/v1/hive/avatar/{self.hive_acc}")
             if res.status_code == 200:
                 # avatar_im = Image.open(BytesIO(res.content))
@@ -334,8 +360,11 @@ class HASAuthentication(BaseModel):
         try:
             msg = await asyncio.wait_for(self.websocket.recv(), time_to_wait.seconds)
         except TimeoutError:
-            logging.warning("Timeout waiting for HAS PKSA Response")
-            raise HASAuthenticationTimeout("Timeout waiting for response")
+            self.error = HASAuthenticationFailure(
+                message="Timeout waiting for response", code=HASAuthErr.timeout
+            )
+            logging.warning(self.error.message)
+            raise self.error
 
         self.auth_ack = AuthAckNakErrHAS.parse_raw(msg)
         logging.debug(self.auth_ack)
@@ -351,4 +380,7 @@ class HASAuthentication(BaseModel):
                 self.expire = self.auth_ack_data.expire
             else:
                 logging.warning("Not successful")
-                raise HASAuthenticationRefused("Integrity good")
+                self.error = HASAuthenticationFailure(
+                    message="Authentication refused", code=HASAuthErr.other
+                )
+                raise self.error

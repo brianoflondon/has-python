@@ -1,16 +1,15 @@
 import asyncio
 import logging
+import os
+import sys
 from datetime import datetime, timezone
-from websockets import connect as ws_connect
+
 import typer
 from pydantic import AnyUrl
+from websockets import connect as ws_connect
 
-from has_python.has import (
-    HAS_SERVER,
-    HASAuthentication,
-    HASAuthenticationRefused,
-    HASAuthenticationTimeout,
-)
+from has_python.has_errors import HASAuthenticationFailure, HASAuthErr
+from has_python.has_lib import HAS_SERVER, HASAuthentication, HASAuthenticationFailure
 
 app = typer.Typer()
 
@@ -38,20 +37,16 @@ async def connect_and_challenge(acc_name: str, has_server: AnyUrl = HAS_SERVER):
             logging.info(f"QR-Code as text {'*'*40} \n\n{has.qr_text}\n\n{'*'*40}")
             await has.waiting_for_challenge_response(time_to_wait)
 
-            logging.info(has.auth_ack_data.token)
+            logging.info(f"Token: {has.auth_ack_data.token}")
             token_life = has.auth_ack_data.expire - datetime.now(tz=timezone.utc)
             logging.info(f"✅ Token: ********************** | Expires in : {token_life}")
-            logging.info(has.app_session_id)
+            logging.info(f"Session ID: {has.app_session_id}")
 
-    except HASAuthenticationRefused:
-        logging.info("❌ Authentication was refused")
-    except HASAuthenticationTimeout:
-        logging.info("❌ Timeout Waiting for PKSA Authentication")
-        pass
-
+    except HASAuthenticationFailure as ex:
+        logging.info(f"{ex.message}")
+        sys.exit(os.EX_UNAVAILABLE)
 
     return
-
 
 
 @app.command()
@@ -66,6 +61,7 @@ def connect(hive_account: str):
     except Exception as ex:
         logging.exception(ex)
         logging.info("Quits")
+
 
 if __name__ == "__main__":
     app()

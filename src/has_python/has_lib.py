@@ -16,9 +16,9 @@ from pydantic.error_wrappers import ValidationError
 from qrcode import QRCode
 from qrcode.constants import ERROR_CORRECT_H
 from qrcode.image.styledpil import StyledPilImage
-# from websockets import connect as ws_connect
 from websockets.legacy.client import WebSocketClientProtocol
 
+from has_python.has_errors import HASAuthenticationFailure, HASAuthErr
 from has_python.hive_validation import (
     SignedAnswer,
     SignedAnswerData,
@@ -26,9 +26,6 @@ from has_python.hive_validation import (
     validate_hivekeychain_ans,
 )
 from has_python.jscrypt_encode_for_python import js_decrypt, js_encrypt
-
-# from Crypto.Cipher import AES
-
 
 # https://stackoverflow.com/questions/35472396/how-does-cryptojs-get-an-iv-when-none-is-specified
 # https://gist.github.com/tly1980/b6c2cc10bb35cb4446fb6ccf5ee5efbc
@@ -106,14 +103,6 @@ class ChallengeAckData(BaseModel):
     challenge: str
 
 
-class HASAuthenticationRefused(Exception):
-    pass
-
-
-class HASAuthenticationTimeout(Exception):
-    pass
-
-
 class AuthDataHAS(BaseModel):
     app: HASApp = HASApp()
     token: str | None
@@ -178,6 +167,7 @@ class HASAuthentication(BaseModel):
     auth_ack: AuthAckNakErrHAS | None
     signed_answer: SignedAnswer | None
     verification: SignedAnswerVerification = False
+    error: HASAuthenticationFailure | None
     token: str | None
     expire: datetime | None
 
@@ -275,11 +265,32 @@ class HASAuthentication(BaseModel):
             )
             self.verification = validate_hivekeychain_ans(self.signed_answer)
         elif self.auth_ack.cmd == CmdType.auth_nack:
-            if self.auth_payload.uuid == self.auth_ack_data:
-                logging.info("Authentication refused: integrity good")
-            else:
-                logging.warning("Authentication refuse: integrity FAILURE")
-                raise HASAuthenticationRefused("Integrity FAILURE")
+            if self.auth_payload.uuid == self.auth_ack.uuid:
+                logging.debug("Communication with HAS integrity good")
+                if not self.auth_ack.data:
+                    self.error = HASAuthenticationFailure(
+                        message=f"No PKSA found for account {self.hive_acc}",
+                        code=HASAuthErr.no_pksa,
+                    )
+                    logging.debug(self.error.message)
+                    raise self.error
+                if (
+                    self.auth_ack.data
+                    and str(self.auth_payload.uuid) == self.auth_ack_data
+                ):
+                    self.error = HASAuthenticationFailure(
+                        message="Authentication refused: integrity GOOD",
+                        code=HASAuthErr.refused,
+                    )
+                    logging.debug(self.error.message)
+                    raise self.error
+                else:
+                    self.error = HASAuthenticationFailure(
+                        message="Authentication refused: integrity FAILURE",
+                        code=HASAuthErr.refused_bad,
+                    )
+                    logging.debug(self.error.message)
+                    raise self.error
 
     async def get_qrcode(self) -> StyledPilImage:
         if qr_text := self.qr_text:
@@ -351,4 +362,7 @@ class HASAuthentication(BaseModel):
                 self.expire = self.auth_ack_data.expire
             else:
                 logging.warning("Not successful")
-                raise HASAuthenticationRefused("Integrity good")
+                self.error = HASAuthenticationFailure(
+                    message="Authentication refused", code=HASAuthErr.other
+                )
+                raise self.error

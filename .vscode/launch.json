@@ -13,13 +13,16 @@
             "justMyCode": true
         },
         {
-            "name": "has",
+            "name": "has - CLI connect",
             "type": "python",
             "request": "launch",
             "program": "src/has_python/cli/has.py",
-            "args": ["connect", "v4vapp.dev"],
+            "args": ["brianoflondon"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "env": {
+                "PYDEVD_DISABLE_FILE_VALIDATION": "1"
+            }
         },
         {
             "name": "HAS Demo",

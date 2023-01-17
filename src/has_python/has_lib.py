@@ -112,9 +112,14 @@ class AuthDataHAS(BaseModel):
     challenge: ChallengeHAS | None
     auth_key_uuid: UUID
 
+    def __init__(__pydantic_self__, **data: Any) -> None:
+        super().__init__(**data)
+
     @property
     def bytes(self):
-        """Return object as json string in bytes"""
+        """
+        Return object as json string in bytes: does not include the `auth_key_uuid`
+        """
         return json.dumps(self.dict(exclude={"auth_key_uuid"})).encode("utf-8")
 
     @property
@@ -164,6 +169,18 @@ class SignDataHAS(BaseModel):
     key_type: KeyType
     ops: str
     broadcast: bool
+    auth_key_uuid: UUID
+
+    @property
+    def bytes(self):
+        """
+        Return object as json string in bytes: does not include the `auth_key_uuid`
+        """
+        return json.dumps(self.dict(exclude={"auth_key_uuid"})).encode("utf-8")
+
+    @property
+    def encrypted_b64(self) -> bytes:
+        return js_encrypt(self.bytes, str_bytes(self.auth_key_uuid))
 
 
 class SignReqHAS(BaseModel):
@@ -171,6 +188,10 @@ class SignReqHAS(BaseModel):
     account: str
     token: str
     data: str
+    auth_key_uuid: UUID
+
+    def __init__(__pydantic_self__, **data: Any) -> None:
+        super().__init__(**data)
 
 
 class HASAuthentication(BaseModel):
@@ -179,12 +200,12 @@ class HASAuthentication(BaseModel):
     uri: AnyUrl = HAS_SERVER
     websocket: WebSocketClientProtocol | None
     challenge_message: str | None
-    app_session_id: UUID = uuid4()
-    auth_key_uuid: UUID = uuid4()
+    app_session_id: UUID
+    auth_key_uuid: UUID
     connected_has: ConnectedHAS | None
     auth_wait: AuthWaitHAS | None
-    auth_data: AuthDataHAS | None
-    auth_req: AuthReqHAS | None
+    auth_data: AuthDataHAS
+    auth_req: AuthReqHAS
     auth_payload: AuthPayloadHAS | None
     auth_ack: AuthAckNakErrHAS | None
     signed_answer: SignedAnswer | None
@@ -197,8 +218,35 @@ class HASAuthentication(BaseModel):
         arbitrary_types_allowed = True
 
     def __init__(self, **data: Any):
+        """
+        Populates the challenge data with the correct encoding and supplies
+        an encrypted one time key:
+            encrypted with this app's HAS_AUTH_REQ_SECRET
+        This is necessary if running against a PKSA service instead of an
+        interactive client (such as Hive KeyChain)
+        """
+        # NOTE: challenge_data will be converted to a challenge str
+        # Within the constructor of ChallengeHAS
+        data["app_session_id"] = uuid4()
+        data["auth_key_uuid"] = uuid4()
+        data["challenge"] = ChallengeHAS(
+            key_type=data.get("key_type"),
+            challenge_data={
+                "timestamp": datetime.now(tz=timezone.utc).timestamp(),
+                "app_session_id": data.get("app_session_id"),
+                "message": data.get("challenge_message"),
+            },
+        )
+        data["auth_data"] = AuthDataHAS(**data)
+        data["auth_req"] = AuthReqHAS(
+            account=data["hive_acc"],
+            data=data["auth_data"].encrypted_b64,
+            # Auth Key needed for using a PKSA Service without QR codes
+            auth_key=js_encrypt(
+                str_bytes(data["auth_key_uuid"]), str_bytes(HAS_AUTH_REQ_SECRET)
+            ),
+        )
         super().__init__(**data)
-        self.setup_challenge(**data)
 
     @property
     def auth_ack_data(self) -> AuthAckDataHAS | str:
@@ -331,6 +379,9 @@ class HASAuthentication(BaseModel):
                     raise self.error
 
     async def get_qrcode(self) -> StyledPilImage:
+        """
+        Returns a QR Image
+        """
         if qr_text := self.qr_text:
             qr = QRCode(
                 version=1,

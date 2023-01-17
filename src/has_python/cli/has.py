@@ -26,11 +26,17 @@ async def connect_and_challenge(
     key_type: KeyType = KeyType.posting,
     token: str = None,
     has_server: AnyUrl = HAS_SERVER,
+    display: bool = True,
+    challenge_message: str = "Any string message goes here",
 ):
+    """
+    Creats a HAS Authentiction connection and (option `display`) shows a QR code.
+
+    """
     has = HASAuthentication(
         hive_acc=acc_name,
         uri=has_server,
-        challenge_message="Any string message goes here",
+        challenge_message=challenge_message,
         key_type=key_type,
         token=token,
     )
@@ -39,7 +45,8 @@ async def connect_and_challenge(
             has.websocket = websocket
             time_to_wait = await has.connect_with_challenge()
             img = await has.get_qrcode()
-            img.show()
+            if display:
+                img.show()
             logging.info(f"PKSA needs to show: {has.auth_wait.uuid}")
             logging.info(f"QR-Code as text {'*'*40} \n\n{has.qr_text}\n\n{'*'*40}")
             await has.waiting_for_challenge_response(time_to_wait)
@@ -58,13 +65,22 @@ async def connect_and_challenge(
 
 
 @app.command()
-def connect(hive_account: str, key_type: KeyType = KeyType.posting, token: str = None):
+def connect(
+    hive_account: str = typer.Argument(
+        ..., help="The Hive account to perform authentication services against"
+    ),
+    key_type: KeyType = typer.Option(KeyType.posting, help="Hive Key type"),
+    token: str = typer.Option(None, help="Token from a previous authentication"),
+    display: bool = typer.Option(True, help="Displays a QR Code in a pop up window"),
+):
     """Start a new connection to
     Hive Authentication Services (HAS)
     from the Hive Account ACC_Name"""
     try:
         asyncio.run(
-            connect_and_challenge(acc_name=hive_account, key_type=key_type, token=token)
+            connect_and_challenge(
+                acc_name=hive_account, key_type=key_type, token=token, display=display
+            )
         )
         print("all done")
     except KeyboardInterrupt:

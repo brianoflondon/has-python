@@ -75,6 +75,7 @@ class CmdType(str, Enum):
     auth_ack = "auth_ack"
     auth_nack = "auth_nack"
     auth_err = "auth_err"
+    sign_req = "sign_req"
 
 
 class ChallengeHAS(BaseModel):
@@ -109,11 +110,16 @@ class AuthDataHAS(BaseModel):
     app: HASApp = HASApp()
     token: str | None
     challenge: ChallengeHAS | None
+    auth_key_uuid: UUID
 
     @property
     def bytes(self):
         """Return object as json string in bytes"""
-        return json.dumps(self.dict()).encode("utf-8")
+        return json.dumps(self.dict(exclude={"auth_key_uuid"})).encode("utf-8")
+
+    @property
+    def encrypted_b64(self) -> bytes:
+        return js_encrypt(self.bytes, str_bytes(self.auth_key_uuid))
 
 
 class AuthReqHAS(BaseModel):
@@ -148,10 +154,23 @@ class AuthAckNakErrHAS(BaseModel):
     data: str | None
 
 
-class AuthAckData(BaseModel):
+class AuthAckDataHAS(BaseModel):
     token: str
     expire: datetime
     challenge: ChallengeHAS = None
+
+
+class SignDataHAS(BaseModel):
+    key_type: KeyType
+    ops: str
+    broadcast: bool
+
+
+class SignReqHAS(BaseModel):
+    cmd: CmdType.sign_req
+    account: str
+    token: str
+    data: str
 
 
 class HASAuthentication(BaseModel):
@@ -182,7 +201,7 @@ class HASAuthentication(BaseModel):
         self.setup_challenge(**data)
 
     @property
-    def auth_ack_data(self) -> AuthAckData | str:
+    def auth_ack_data(self) -> AuthAckDataHAS | str:
         """
         On the fly decryption of a response from HAS
         If the response is a rejection `auth_nack` this
@@ -192,7 +211,7 @@ class HASAuthentication(BaseModel):
             "utf-8"
         )
         try:
-            return AuthAckData.parse_raw(data_string)
+            return AuthAckDataHAS.parse_raw(data_string)
         except ValidationError:
             return data_string
         except Exception as ex:
@@ -203,12 +222,16 @@ class HASAuthentication(BaseModel):
     def auth_key(self) -> bytes:
         return self.auth_key_uuid.bytes
 
-    @property
-    def b64_auth_data_encrypted(self):
-        return js_encrypt(self.auth_data.bytes, str_bytes(self.auth_key_uuid))
+    # @property
+    # def b64_auth_data_encrypted(self) -> bytes:
+    #     return js_encrypt(self.auth_data.bytes, str_bytes(self.auth_key_uuid))
 
     @property
-    def b64_auth_payload_encrypted(self):
+    def b64_auth_payload_encrypted(self) -> bytes:
+        """
+        Encrypts the HAS_AUTH_REQ_SECRET for sharing with a PKSA as a service.
+        ignored when using Hive Keychain interactively
+        """
         return js_encrypt(str_bytes(self.auth_key_uuid), str_bytes(HAS_AUTH_REQ_SECRET))
 
     @property
@@ -237,10 +260,12 @@ class HASAuthentication(BaseModel):
                     "message": data.get("challenge_message"),
                 },
             )
-            self.auth_data = AuthDataHAS(challenge=challenge, token=self.token)
+            self.auth_data = AuthDataHAS(
+                challenge=challenge, token=self.token, auth_key_uuid=self.auth_key_uuid
+            )
             self.auth_req = AuthReqHAS(
                 account=self.hive_acc,
-                data=self.b64_auth_data_encrypted,
+                data=self.auth_data.encrypted_b64,
                 # Auth Key needed for using a PKSA Service without QR codes
                 auth_key=self.b64_auth_payload_encrypted,
             )
@@ -316,7 +341,8 @@ class HASAuthentication(BaseModel):
             qr.add_data(qr_text)
             # Create a new image with a white background
             text = str(
-                f"Check: {self.auth_wait.uuid} - {self.hive_acc} - {self.key_type.value}"
+                f"Check: {self.auth_wait.uuid} - "
+                f"{self.hive_acc} - {self.key_type.value}"
             )
             res = requests.get(f"https://api.v4v.app/v1/hive/avatar/{self.hive_acc}")
             if res.status_code == 200:

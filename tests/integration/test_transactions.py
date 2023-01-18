@@ -13,7 +13,7 @@ Testing Note: this relies on running Arcange's PKSA server
 
 @pytest.mark.asyncio
 async def test_transaction_request():
-    test_account = "v4vapp.dhf"
+    test_account = "v4vapp.dev"
     has = HASAuthentication(hive_acc=test_account)
     async with ws_connect(has.uri) as websocket:
         has.websocket = websocket
@@ -36,7 +36,7 @@ async def test_transaction_request():
             },
         )
 
-        time_to_wait = await has.transaction_request(ops=op.op_value)
+        time_to_wait = await has.transaction_request(ops=op.__repr__())
         await has.waiting_for_challenge_response(time_to_wait=time_to_wait)
 
 

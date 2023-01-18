@@ -191,7 +191,7 @@ class AuthAckDataHAS(BaseModel):
 
 class SignDataHAS(BaseModel):
     key_type: KeyType
-    ops: dict
+    ops: list
     broadcast: bool
     auth_key_uuid: UUID
 
@@ -201,6 +201,11 @@ class SignDataHAS(BaseModel):
         Return object as json string in bytes: does not include the `auth_key_uuid`
         Also needs to carefully encode ops only once.
         """
+        self_dict = self.dict(exclude={"auth_key_uuid"})
+        json_data = json.dumps(self_dict)
+        encoded_bytes = json_data.encode("utf-8")
+        return encoded_bytes
+
         return json.dumps(self.dict(exclude={"auth_key_uuid"})).encode("utf-8")
         # self.ops = json.dumps(self.ops)
         holding_json = self.dict(exclude={"auth_key_uuid"})
@@ -483,13 +488,13 @@ class HASAuthentication(BaseModel):
                 )
                 raise self.error
 
-    async def transaction_request(self, ops: dict, broadcast: bool = True):
+    async def transaction_request(self, ops: list, broadcast: bool = True):
         """
         Create, sign and send a transaction.
         """
         self.sign_data = SignDataHAS(
             key_type=self.key_type,
-            ops=ops,
+            ops=[ops],
             auth_key_uuid=self.auth_key_uuid,
             broadcast=broadcast,
         )

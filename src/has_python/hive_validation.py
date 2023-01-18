@@ -8,7 +8,7 @@ from beemgraphenebase.account import PublicKey
 from beemgraphenebase.ecdsasig import verify_message
 from pydantic import BaseModel, Field
 
-AUTHENTICATION_TIME_LIMIT = 60
+AUTHENTICATION_TIME_LIMIT = 600
 
 
 class SignedAnswerData(BaseModel):

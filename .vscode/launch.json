@@ -21,8 +21,8 @@
                 "v4vapp.dev",
                 "--key-type",
                 "posting",
-                "--token",
-                "bbcb5b87-fcc7-46c1-a760-b4bed22848f9"
+                // "--token",
+                // "bbcb5b87-fcc7-46c1-a760-b4bed22848f9"
             ],
             "console": "integratedTerminal",
             "justMyCode": true,

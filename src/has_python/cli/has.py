@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -8,13 +9,13 @@ import typer
 from pydantic import AnyUrl
 from websockets import connect as ws_connect
 
-from has_python.has_errors import HASAuthenticationFailure
+from has_python.has_errors import HASFailure
 from has_python.has_lib import HAS_SERVER, HASAuthentication, KeyType
 
 app = typer.Typer()
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
     # format="{asctime} {levelname} {module} {lineno:>5} : {message}",
     # datefmt="%Y-%m-%dT%H:%M:%S,uuu",
@@ -57,7 +58,7 @@ async def connect_and_challenge(
             )
             logging.info(f"Session ID: {has.app_session_id}")
 
-    except HASAuthenticationFailure as ex:
+    except HASFailure as ex:
         logging.info(f"{ex.message}")
         sys.exit(os.EX_UNAVAILABLE)
 
@@ -78,6 +79,7 @@ def connect(
     from the Hive Account ACC_Name"""
     try:
         asyncio.run(
+            # test_transaction_request(),
             connect_and_challenge(
                 acc_name=hive_account, key_type=key_type, token=token, display=display
             )
@@ -88,6 +90,34 @@ def connect(
     except Exception as ex:
         logging.exception(ex)
         logging.info("Quits")
+
+
+async def test_transaction_request():
+    test_account = "brianoflondon"
+    has = HASAuthentication(hive_acc=test_account)
+    async with ws_connect(has.uri) as websocket:
+        has.websocket = websocket
+        time_to_wait = await has.connect_with_challenge()
+        img = await has.get_qrcode()
+        img.show()
+        await has.waiting_for_challenge_response(time_to_wait)
+        assert has.token
+        assert has.expire
+        payload = {"HAS": "testing"}
+        logging.info(has.token)
+        test_ops = [
+            [
+                "custom_json",
+                {
+                    "id": "v4vapp_has_testing",
+                    "json": payload,
+                    "required_auths": [],
+                    "required_posting_auths": [test_account],
+                },
+            ]
+        ]
+        time_to_wait = await has.transaction_request(ops=test_ops)
+        await has.waiting_for_challenge_response(time_to_wait=time_to_wait)
 
 
 if __name__ == "__main__":

@@ -1,20 +1,21 @@
 from enum import Enum
 
 
-class HASAuthErr(int, Enum):
+class HASErr(int, Enum):
     refused = 0
     refused_bad = 1
     timeout = 2
     no_pksa = 3
-    other = 4
+    transaction_failed = 4
+    other = 10
 
 
-class HASAuthenticationFailure(Exception):
+class HASFailure(Exception):
     message: str
-    code: HASAuthErr
+    code: HASErr
     pass
 
-    def __init__(self, message: str, code: HASAuthErr) -> None:
+    def __init__(self, message: str, code: HASErr) -> None:
         self.message = f"❌ {message}"
         self.code = code
 

@@ -98,6 +98,7 @@ class CmdType(str, Enum):
     sign_wait = "sign_wait"
     sign_ack = "sign_ack"
     sign_nack = "sign_nack"
+    sign_error = "sign_error"
 
 
 class ChallengeHAS(BaseModel):

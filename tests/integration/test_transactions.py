@@ -13,13 +13,14 @@ Testing Note: this relies on running Arcange's PKSA server
 
 @pytest.mark.asyncio
 async def test_transaction_request():
-    test_account = "v4vapp.dev"
+    test_account = "brianoflondon"
     has = HASAuthentication(hive_acc=test_account)
     async with ws_connect(has.uri) as websocket:
         has.websocket = websocket
         time_to_wait = await has.connect_with_challenge()
         img = await has.get_qrcode()
-        img.show()
+        if not test_account == "v4vapp.dev":
+            img.show()
         await has.waiting_for_challenge_response(time_to_wait)
         assert has.token
         assert has.expire

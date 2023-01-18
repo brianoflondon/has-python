@@ -31,7 +31,7 @@ from has_python.jscrypt_encode_for_python import js_decrypt, js_encrypt
 # https://gist.github.com/tly1980/b6c2cc10bb35cb4446fb6ccf5ee5efbc
 # https://devpress.csdn.net/python/630460127e6682346619ab98.html
 
-
+logging.getLogger("graphenerpc").setLevel(logging.WARNING)
 HAS_AUTHENTICATION_TIME_LIMIT = 600
 
 load_dotenv()
@@ -470,8 +470,10 @@ class HASAuthentication(BaseModel):
             logging.warning(self.error.message)
             raise self.error
 
+        logging.info(f"Message received: {msg}")
         self.auth_sign_ack = AuthSignAckNakErrHAS.parse_raw(msg)
-        logging.debug(self.auth_sign_ack)
+        logging.info(f"Command Type: {self.auth_sign_ack.cmd}")
+        logging.info(self.auth_sign_ack)
         if self.auth_sign_ack.uuid == self.auth_wait.uuid:
             logging.info("uuid OK")
             self.decrypt()

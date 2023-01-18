@@ -14,11 +14,10 @@ from has_python.has_lib import HAS_SERVER, HASAuthentication, KeyType
 
 app = typer.Typer()
 
+logging.getLogger("graphenerpc").setLevel(logging.WARNING)
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
-    # format="{asctime} {levelname} {module} {lineno:>5} : {message}",
-    # datefmt="%Y-%m-%dT%H:%M:%S,uuu",
 )
 
 

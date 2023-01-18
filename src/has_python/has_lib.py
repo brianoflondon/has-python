@@ -201,11 +201,12 @@ class SignDataHAS(BaseModel):
         Return object as json string in bytes: does not include the `auth_key_uuid`
         Also needs to carefully encode ops only once.
         """
+        return json.dumps(self.dict(exclude={"auth_key_uuid"})).encode("utf-8")
         # self.ops = json.dumps(self.ops)
         holding_json = self.dict(exclude={"auth_key_uuid"})
         if temp_store := self.ops.get("json"):
             self.ops["json"] = "replaceMeNowZigaZiga"
-            holding_json = json.dumps([[self.dict(exclude={"auth_key_uuid"})]])
+            holding_json = json.dumps([self.dict(exclude={"auth_key_uuid"})])
             holding_json = holding_json.replace(
                 "replaceMeNowZigaZiga", json.dumps(temp_store)
             )

@@ -178,16 +178,11 @@ class AuthAckHAS(HASMessage):
     def validate(self):
         """Validates an authentication and challenge"""
         # Find the matching index of ACK_WAIT_LIST
-        index = [
-            i
-            for i, auth_wait in enumerate(ACK_WAIT_LIST)
-            if auth_wait.uuid == self.uuid
-        ][0]
-        auth_wait = ACK_WAIT_LIST[index]
+        auth_wait = GLOBAL_LISTS.find_wait(self.uuid)
         # Hmmm not sure about this assumption
-        auth_object = AUTH_LIST[index]
-        del ACK_WAIT_LIST[index]
-        del AUTH_LIST[index]
+        auth_object = GLOBAL_LISTS.find_auth(auth_wait.account)
+        # del ACK_WAIT_LIST[index]
+        # del AUTH_LIST[index]
         if auth_object.acc_name != auth_wait.account:
             raise
         data_bytes = self.data.encode("utf-8")
@@ -195,10 +190,8 @@ class AuthAckHAS(HASMessage):
             data_bytes, str_bytes(auth_object.auth_data.auth_key)
         ).decode("utf-8")
         auth_ack_data = AuthAckDataHAS.parse_raw(data_string)
-        logging.debug(f"AUTH_LIST items: {len(AUTH_LIST)}")
-        logging.debug(f"ACK_WAIT_LIST items: {len(ACK_WAIT_LIST)}")
-        logging.debug(auth_ack_data)
-        logging.debug(f"Token: {auth_ack_data.token}")
+        logging.info(auth_ack_data)
+        logging.info(f"Token: {auth_ack_data.token}")
         signed_answer = SignedAnswer(
             result=auth_ack_data.challenge.challenge,
             request_id=1,
@@ -219,7 +212,7 @@ class AuthAckHAS(HASMessage):
                 exipre=auth_ack_data.expire,
                 auth_key=auth_object.auth_data.auth_key,
             )
-            VALID_TOKEN_LIST.append(valid_token)
+            GLOBAL_LISTS.token_list.append(valid_token)
 
 
 class AuthAckDataHAS(BaseModel):
@@ -236,13 +229,14 @@ class ConnectedHAS(HASMessage):
     ping_rate: int
     version: str
     protocol: float
-    received: datetime = datetime.utcnow()
+    received: datetime = datetime.now(tz=timezone.utc)
 
 
 class AuthObjectHAS(BaseModel):
     acc_name: str
     auth_data: AuthDataHAS
     auth_req: AuthReqHAS
+    timestamp: datetime = datetime.now(tz=timezone.utc)
 
 
 class ValidToken(BaseModel):
@@ -316,6 +310,12 @@ class SignReqHAS(BaseModel):
     auth_key: UUID
 
 
+class SignWaitHAS(BaseModel):
+    cmd: CmdType = CmdType.sign_wait
+    uuid: UUID
+    expirt: datetime
+
+
 async def socket_listen(has_socket):
     """
     Listen to a socket and act on what is received.
@@ -324,23 +324,22 @@ async def socket_listen(has_socket):
         while True:
             msg = await has_socket.recv()
             cmd = HASMessage.parse_raw(msg)
-            logging.debug(f"-------> Recivied: {cmd}")
-            logging.debug(msg)
+            logging.info(f"-------> Recivied: {cmd}")
+            logging.info(msg)
             match cmd.cmd:
                 case CmdType.connected:
                     processed = ConnectedHAS.parse_raw(msg)
                     processed.socketid
-                    logging.debug(processed)
+                    logging.info(processed)
                 case CmdType.auth_wait:
                     auth_wait = AuthWaitHAS.parse_raw(msg)
                     # Display QR Code
-                    # This is where KEY is definied
                     auth_payload = AuthPayloadHAS(
                         account=auth_wait.account,
                         uuid=auth_wait.uuid,
-                        key=AUTH_LIST[
-                            0
-                        ].auth_data.auth_key,  # UUID("37c3b377-cf91-44a3-9e21-6af5b8773bf3"),
+                        key=GLOBAL_LISTS.find_auth(
+                            auth_wait.account
+                        ).auth_data.auth_key,
                     )
                     extra_text = str(
                         f"Check: {auth_wait.uuid} - " f"{auth_wait.account}"
@@ -348,8 +347,14 @@ async def socket_listen(has_socket):
                     img = auth_payload.qr_image(extra_text=extra_text)
                     if not auth_wait.account == "v4vapp.dev":
                         img.show()
-                    ACK_WAIT_LIST.append(auth_wait)
-                    logging.debug(auth_wait)
+                    GLOBAL_LISTS.wait_list.append(auth_wait)
+                    logging.info(auth_wait)
+
+                case CmdType.sign_wait:
+                    sign_wait = SignWaitHAS.parse_raw(msg)
+                    logging.info(
+                        f"********** Alert User to authorise transaction {sign_wait.uuid}"
+                    )
 
                 case CmdType.auth_ack:
                     auth_ack = AuthAckHAS.parse_raw(msg)
@@ -371,7 +376,7 @@ async def execute_tasks(has_socket):
     while True:
         msg: HASMessage = await TASK_QUEUE.get()
         await has_socket.send(msg.json(exclude_none=True))
-        logging.debug(f"<------ Sent:   {msg.cmd}")
+        logging.info(f"<------ Sent:   {msg.cmd}")
 
 
 async def main_loop():
@@ -381,12 +386,14 @@ async def main_loop():
             execute_tasks(has_socket),
             test_send_auth_req(),
             test_send_transaction(),
+            # test_send_transaction(),
+            # test_send_transaction(),
         ]
         answers = await asyncio.gather(*tasks)
 
 
 async def test_send_auth_req():
-    for acc in ["v4vapp"]:  # ,'brianoflondon']:
+    for acc in ["v4vapp.dev", "brianoflondon"]:  # ,'brianoflondon']:
         # await asyncio.sleep(3)
         use_pksa_key = False
         if acc == "v4vapp.dev":
@@ -397,18 +404,17 @@ async def test_send_auth_req():
             challenge_message=f"{acc} Welcome to the Party!",
             use_pksa_key=use_pksa_key,
         )
-        AUTH_LIST.append(auth_object)
+        GLOBAL_LISTS.auth_list.append(auth_object)
         await TASK_QUEUE.put(auth_object.auth_req)
 
 
 async def test_send_transaction():
-    test_account = "v4vapp"
+    test_account = "brianoflondon"
     # find valid Token
     while True:
         await asyncio.sleep(5)
-        valid_tokens = [vt for vt in VALID_TOKEN_LIST if vt.acc_name == test_account]
-        if valid_tokens:
-            valid_token = valid_tokens[0]
+        valid_token = GLOBAL_LISTS.find_token(test_account)
+        if valid_token:
             payload = {"HAS": "testing"}
             payload_json = json.dumps(payload, separators=(",", ":"), default=str)
             op = Operation(
@@ -431,21 +437,43 @@ async def test_send_transaction():
                 auth_key=valid_token.auth_key,
                 data=sign_data.encrypted_b64(valid_token.auth_key),
             )
-            AUTH_LIST.append(sign_req)
+            logging.info(sign_req)
+            GLOBAL_LISTS.auth_list.append(sign_req)
             await TASK_QUEUE.put(sign_req)
             break
 
-class AuthList(BaseModel):
+
+class AllLists(BaseModel):
     auth_list: List[AuthObjectHAS] = []
+    wait_list: List[AuthWaitHAS] = []
+    token_list: List[ValidToken] = []
+
+    def find_auth(self, acc_name: str) -> AuthObjectHAS:
+        found = [item for item in self.auth_list if item.acc_name == acc_name]
+        if len(found) == 1:
+            return found[0]
+        raise Exception("Need to deal with multiple concurrent auth requests")
+
+    def find_wait(self, uuid: UUID) -> AuthWaitHAS:
+        found = [item for item in self.wait_list if item.uuid == uuid]
+        if len(found) == 1:
+            return found[0]
+        raise Exception("Need to deal with multiple concurrent auth requests")
+
+    def find_token(self, acc_name: str) -> ValidToken | None:
+        found = [item for item in self.token_list if item.acc_name == acc_name]
+        if not found:
+            return None
+        if len(found) == 1:
+            return found[0]
+        raise Exception("Need to deal with multiple concurrent auth requests")
 
 
-
-
-
+GLOBAL_LISTS: AllLists = AllLists()
 TASK_QUEUE = asyncio.Queue()
-AUTH_LIST: List[AuthObjectHAS] = []
-ACK_WAIT_LIST: List[AuthWaitHAS] = []
-VALID_TOKEN_LIST: List[ValidToken] = []
+# AUTH_LIST: AuthList = AuthList()
+# ACK_WAIT_LIST: List[AuthWaitHAS] = []
+# VALID_TOKEN_LIST: List[ValidToken] = []
 
 if __name__ == "__main__":
     asyncio.run(main_loop())

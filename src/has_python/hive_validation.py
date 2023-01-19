@@ -40,6 +40,8 @@ class SignedAnswerVerification(BaseModel):
     elapsed_time: timedelta
 
 
+
+
 def validate_hivekeychain_ans(signed_answer: SignedAnswer) -> SignedAnswerVerification:
     """takes in the answer from hivekeychain and checks everything"""
     """ https://bit.ly/keychainpython """
@@ -83,3 +85,22 @@ def validate_hivekeychain_ans(signed_answer: SignedAnswer) -> SignedAnswerVerifi
         return SignedAnswerVerification(
             acc_name=acc_name, success=False, pubkey=pubkey_s, elapsed_time=elapsed_time
         )
+
+
+class Operation:
+    """Taken from Lighthive by Emre"""
+
+    def __init__(self, op_type: str, value):
+        self.type = op_type
+        self.op_type = "%s_operation" % type
+        self.op_value = value
+
+    def to_dict(self):
+        # return {
+        #     "type": self.op_type,
+        #     "value": self.op_value,
+        # }
+        return [self.type, self.op_value]
+
+    def __repr__(self):
+        return self.to_dict()

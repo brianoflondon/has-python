@@ -21,7 +21,7 @@ logging.basicConfig(
 
 @pytest.mark.asyncio
 async def test_transaction_request():
-    test_account = "v4vapp.dev"
+    test_account = "brianoflondon"
     has = HASAuthentication(hive_acc=test_account)
     async with ws_connect(has.uri) as websocket:
         has.websocket = websocket

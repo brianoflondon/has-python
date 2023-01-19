@@ -17,13 +17,19 @@ from qrcode import QRCode
 from qrcode.constants import ERROR_CORRECT_H
 from qrcode.image.styledpil import StyledPilImage
 
+from has_python.hive_validation import (
+    Operation,
+    SignedAnswer,
+    SignedAnswerData,
+    validate_hivekeychain_ans,
+)
 from has_python.jscrypt_encode_for_python import js_decrypt, js_encrypt
 
-logging.getLogger("graphenerpc").setLevel(logging.WARNING)
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
 )
+logging.getLogger("graphenerpc").setLevel(logging.ERROR)
 
 load_dotenv()
 HAS_SERVER = "wss://hive-auth.arcange.eu"
@@ -124,10 +130,10 @@ class AuthWaitHAS(HASMessage):
 
 
 class AuthPayloadHAS(BaseModel):
-    host: str = HAS_SERVER
     account: str
     uuid: UUID
-    key: UUID
+    key: UUID  # This is the auth-key used when creating "The APP must then encrypt the auth_data object using an encryption key (auth_key)"
+    host: str = HAS_SERVER
 
     @property
     def qr_text(self) -> str:
@@ -136,7 +142,7 @@ class AuthPayloadHAS(BaseModel):
 
     @property
     def auth_payload_base64(self) -> str:
-        return base64.b64encode((self.json()).encode()).decode("utf-8")
+        return base64.b64encode((self.json()).encode("utf-8")).decode("utf-8")
 
     def qr_image(self, extra_text: str) -> StyledPilImage:
         """QR Code Image"""
@@ -193,6 +199,27 @@ class AuthAckHAS(HASMessage):
         logging.debug(f"ACK_WAIT_LIST items: {len(ACK_WAIT_LIST)}")
         logging.debug(auth_ack_data)
         logging.debug(f"Token: {auth_ack_data.token}")
+        signed_answer = SignedAnswer(
+            result=auth_ack_data.challenge.challenge,
+            request_id=1,
+            publicKey=auth_ack_data.challenge.pubkey,
+            data=SignedAnswerData(
+                _type="HAS",
+                username=auth_object.auth_req.account,
+                message=auth_object.auth_data.challenge.challenge,
+                method=auth_object.auth_data.challenge.key_type,
+                key=auth_object.auth_data.challenge.key_type,
+            ),
+        )
+        verification = validate_hivekeychain_ans(signed_answer)
+        if verification.success:
+            valid_token = ValidToken(
+                acc_name=verification.acc_name,
+                token=auth_ack_data.token,
+                exipre=auth_ack_data.expire,
+                auth_key=auth_object.auth_data.auth_key,
+            )
+            VALID_TOKEN_LIST.append(valid_token)
 
 
 class AuthAckDataHAS(BaseModel):
@@ -218,11 +245,22 @@ class AuthObjectHAS(BaseModel):
     auth_req: AuthReqHAS
 
 
-async def get_auth_req_challenge(
-    acc_name: str, key_type: KeyType, challenge_message: str, token: str = None
+class ValidToken(BaseModel):
+    acc_name: str
+    token: str
+    exipre: datetime
+    auth_key: UUID
+
+
+async def build_auth_req_challenge(
+    acc_name: str,
+    key_type: KeyType,
+    challenge_message: str,
+    token: str = None,
+    use_pksa_key: bool = False,
 ) -> AuthObjectHAS:
     """
-    Sends an `auth_req` with a challenge
+    Builds an `auth_req` with a challenge
     """
     challenge = ChallengeHAS(
         key_type=key_type,
@@ -232,17 +270,50 @@ async def get_auth_req_challenge(
             "message": challenge_message,
         },
     )
-    auth_data = AuthDataHAS(token=token, challenge=challenge, auth_key=uuid4())
+    auth_data = AuthDataHAS(
+        token=token,
+        challenge=challenge,
+        auth_key=uuid4(),  # UUID("37c3b377-cf91-44a3-9e21-6af5b8773bf3"), # hard coded
+    )
     auth_req = AuthReqHAS(
         cmd=CmdType.auth_req,
         account=acc_name,
         data=auth_data.encrypted_b64,
-        auth_key=js_encrypt(
-            str_bytes(auth_data.auth_key), str_bytes(HAS_AUTH_REQ_SECRET)
-        ),
     )
+    if use_pksa_key:
+        auth_req.auth_key = js_encrypt(
+            str_bytes(auth_data.auth_key), str_bytes(HAS_AUTH_REQ_SECRET)
+        )
 
     return AuthObjectHAS(acc_name=acc_name, auth_data=auth_data, auth_req=auth_req)
+
+
+class SignDataHAS(BaseModel):
+    key_type: KeyType
+    ops: list
+    broadcast: bool
+
+    @property
+    def bytes(self):
+        """
+        Return object as json string in bytes: does not include the `auth_key_uuid`
+        Also needs to carefully encode ops only once.
+        """
+        # self_dict = self.dict(exclude={"auth_key_uuid"})
+        json_data = json.dumps(self.dict())
+        encoded_bytes = json_data.encode("utf-8")
+        return encoded_bytes
+
+    def encrypted_b64(self, auth_key) -> bytes:
+        return js_encrypt(self.bytes, str_bytes(auth_key))
+
+
+class SignReqHAS(BaseModel):
+    cmd: CmdType = CmdType.sign_req
+    account: str
+    token: str
+    data: str
+    auth_key: UUID
 
 
 async def socket_listen(has_socket):
@@ -267,13 +338,16 @@ async def socket_listen(has_socket):
                     auth_payload = AuthPayloadHAS(
                         account=auth_wait.account,
                         uuid=auth_wait.uuid,
-                        key=uuid4(),
+                        key=AUTH_LIST[
+                            0
+                        ].auth_data.auth_key,  # UUID("37c3b377-cf91-44a3-9e21-6af5b8773bf3"),
                     )
                     extra_text = str(
                         f"Check: {auth_wait.uuid} - " f"{auth_wait.account}"
                     )
                     img = auth_payload.qr_image(extra_text=extra_text)
-                    img.show()
+                    if not auth_wait.account == "v4vapp.dev":
+                        img.show()
                     ACK_WAIT_LIST.append(auth_wait)
                     logging.debug(auth_wait)
 
@@ -305,27 +379,71 @@ async def main_loop():
         tasks = [
             socket_listen(has_socket),
             execute_tasks(has_socket),
-            test_send(),
+            test_send_auth_req(),
+            # test_send_transaction(),
         ]
         answers = await asyncio.gather(*tasks)
 
 
-async def test_send():
-    for i in range(1):
+async def test_send_auth_req():
+    for acc in ["v4vapp"]:  # ,'brianoflondon']:
         # await asyncio.sleep(3)
-        auth_object = await get_auth_req_challenge(
-            acc_name="v4vapp.dev",
+        use_pksa_key = False
+        if acc == "v4vapp.dev":
+            use_pksa_key = True
+        auth_object = await build_auth_req_challenge(
+            acc_name=acc,
             key_type=KeyType.posting,
-            challenge_message=f"{i} Welcome to the party",
+            challenge_message=f"{acc} Welcome to the Party!",
+            use_pksa_key=use_pksa_key,
         )
         AUTH_LIST.append(auth_object)
         await TASK_QUEUE.put(auth_object.auth_req)
 
 
+async def test_send_transaction():
+    test_account = "v4vapp.dev"
+    # find valid Token
+    await asyncio.sleep(5)
+    valid_tokens = [vt for vt in VALID_TOKEN_LIST if vt.acc_name == test_account]
+    if valid_tokens:
+        valid_token = valid_tokens[0]
+        payload = {"HAS": "testing"}
+        payload_json = json.dumps(payload, separators=(",", ":"), default=str)
+        op = Operation(
+            "custom_json",
+            {
+                "required_auths": [],
+                "required_posting_auths": [test_account],
+                "id": "v4vapp_has_testing",
+                "json": payload_json,
+            },
+        )
+        sign_data = SignDataHAS(
+            key_type=KeyType.posting,
+            ops=[op.to_dict()],
+            broadcast=True,
+        )
+        sign_req = SignReqHAS(
+            account=valid_token.acc_name,
+            token=valid_token.token,
+            auth_key=valid_token.auth_key,
+            data=sign_data.encrypted_b64(valid_token.auth_key),
+        )
+        AUTH_LIST.append(sign_req)
+        await TASK_QUEUE.put(sign_req)
+
+class AuthList(BaseModel):
+    auth_list: List[AuthObjectHAS] = []
+
+
+
+
+
 TASK_QUEUE = asyncio.Queue()
 AUTH_LIST: List[AuthObjectHAS] = []
 ACK_WAIT_LIST: List[AuthWaitHAS] = []
-
+VALID_TOKEN_LIST: List[ValidToken] = []
 
 if __name__ == "__main__":
     asyncio.run(main_loop())

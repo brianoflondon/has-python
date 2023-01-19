@@ -91,7 +91,7 @@ class HASApp(BaseModel):
 
 class AuthDataHAS(BaseModel):
     app: HASApp = HASApp()
-    token: str | None
+    token: UUID | None
     challenge: ChallengeHAS | None
     auth_key: UUID
 
@@ -112,7 +112,7 @@ class HASMessage(BaseModel):
 class AuthReqHAS(HASMessage):
     account: str
     data: str
-    token: str | None
+    token: UUID | None
     auth_key: str | None
 
 
@@ -210,16 +210,20 @@ class AuthAckHAS(HASMessage):
 
 
 class AuthAckDataHAS(BaseModel):
-    token: str
+    token: UUID
     expire: datetime
     challenge: ChallengeHAS = None
 
 
-class HASCommon(HASMessage):
-    """Common data across all sending classes"""
+class SignAckHAS(HASMessage):
+    uuid: UUID
+    broadcast: bool
+    data: Any
 
-    hive_acc: str
-    key_type: KeyType = KeyType.posting
+
+class SignNackHAS(HASMessage):
+    uuid: UUID
+    data: str
 
 
 class ConnectedHAS(HASMessage):
@@ -234,7 +238,7 @@ class ConnectedHAS(HASMessage):
 
 class SignReqHAS(HASMessage):
     account: str
-    token: str
+    token: UUID
     data: str
     auth_key: UUID
 
@@ -253,7 +257,7 @@ class AuthObjectHAS(BaseModel):
 
 class ValidToken(BaseModel):
     acc_name: str
-    token: str
+    token: UUID
     exipre: datetime
     auth_key: UUID
 
@@ -262,7 +266,7 @@ async def build_auth_req_challenge(
     acc_name: str,
     key_type: KeyType,
     challenge_message: str,
-    token: str = None,
+    token: UUID = None,
     use_pksa_key: bool = False,
 ) -> AuthObjectHAS:
     """
@@ -314,6 +318,42 @@ class SignDataHAS(BaseModel):
         return js_encrypt(self.bytes, str_bytes(auth_key))
 
 
+class AllLists(BaseModel):
+    auth_list: List[AuthObjectHAS] = []
+    wait_list: List[AuthWaitHAS] = []
+    token_list: List[ValidToken] = []
+
+    def find_auth(self, acc_name: str) -> AuthObjectHAS:
+        found = [item for item in self.auth_list if item.acc_name == acc_name]
+        if len(found) == 1:
+            return found[0]
+        raise Exception("Need to deal with multiple concurrent auth requests")
+
+    def del_auth(self, found: AuthObjectHAS):
+        """Finda auth item and deletes it"""
+        index = self.auth_list.index(found)
+        del self.auth_list[index]
+
+    def find_wait(self, uuid: UUID) -> AuthWaitHAS:
+        found = [item for item in self.wait_list if item.uuid == uuid]
+        if len(found) == 1:
+            return found[0]
+        raise Exception("Need to deal with multiple concurrent auth requests")
+
+    def del_wait(self, found: AuthWaitHAS):
+        """Finds a waiting item and deletes it"""
+        index = self.wait_list.index(found)
+        del self.wait_list[index]
+
+    def find_token(self, acc_name: str) -> ValidToken | None:
+        found = [item for item in self.token_list if item.acc_name == acc_name]
+        if not found:
+            return None
+        if len(found) == 1:
+            return found[0]
+        raise Exception("Need to deal with multiple concurrent auth requests")
+
+
 async def socket_listen(has_socket):
     """
     Listen to a socket and act on what is received.
@@ -353,11 +393,16 @@ async def socket_listen(has_socket):
                     logging.info(
                         f"****** Alert User to authorise transaction {sign_wait.uuid}"
                     )
-
                 case CmdType.auth_ack:
                     auth_ack = AuthAckHAS.parse_raw(msg)
                     logging.debug(auth_ack)
                     auth_ack.validate()
+                case CmdType.sign_ack:
+                    sign_ack = SignAckHAS.parse_raw(msg)
+
+                case CmdType.sign_nack:
+                    sign_nack = SignNackHAS.parse_raw(msg)
+
                 case CmdType.sign_error:
                     logging.info("Sign Error")
 
@@ -379,7 +424,9 @@ async def execute_tasks(has_socket):
         msg: HASMessage = await TASK_QUEUE.get()
         try:
             await has_socket.send(msg.json(exclude_none=True))
+            await asyncio.sleep(0.1)
         except Exception as ex:
+            await asyncio.sleep(1)
             logging.exception(ex)
             logging.info("Putting the msg back int the Queue")
             await TASK_QUEUE.put(msg)
@@ -401,7 +448,7 @@ async def main_loop():
 
 
 async def test_send_auth_req():
-    for acc in ["v4vapp.dev"]:  # ,'brianoflondon']:
+    for acc in ["hivehydra"]:  # ,'brianoflondon']:
         # await asyncio.sleep(3)
         use_pksa_key = False
         if acc == "v4vapp.dev":
@@ -417,13 +464,13 @@ async def test_send_auth_req():
 
 
 async def test_send_transaction():
-    test_account = "v4vapp.dev"
+    test_account = "hivehydra"
     # find valid Token
-    while True:
-        await asyncio.sleep(5)
+    await asyncio.sleep(70)
+    for i in range(10):
         valid_token = GLOBAL_LISTS.find_token(test_account)
         if valid_token:
-            payload = {"HAS": "testing"}
+            payload = {"HAS": f"{i} - testing", "timestamp": str(datetime.now())}
             payload_json = json.dumps(payload, separators=(",", ":"), default=str)
             op = Operation(
                 "custom_json",
@@ -449,43 +496,7 @@ async def test_send_transaction():
             logging.info(sign_req)
             GLOBAL_LISTS.auth_list.append(sign_req)
             await TASK_QUEUE.put(sign_req)
-            break
-
-
-class AllLists(BaseModel):
-    auth_list: List[AuthObjectHAS] = []
-    wait_list: List[AuthWaitHAS] = []
-    token_list: List[ValidToken] = []
-
-    def find_auth(self, acc_name: str) -> AuthObjectHAS:
-        found = [item for item in self.auth_list if item.acc_name == acc_name]
-        if len(found) == 1:
-            return found[0]
-        raise Exception("Need to deal with multiple concurrent auth requests")
-
-    def del_auth(self, found: AuthObjectHAS):
-        """Finda auth item and deletes it"""
-        index = self.auth_list.index(found)
-        del self.auth_list[index]
-
-    def find_wait(self, uuid: UUID) -> AuthWaitHAS:
-        found = [item for item in self.wait_list if item.uuid == uuid]
-        if len(found) == 1:
-            return found[0]
-        raise Exception("Need to deal with multiple concurrent auth requests")
-
-    def del_wait(self, found: AuthWaitHAS):
-        """Finds a waiting item and deletes it"""
-        index = self.wait_list.index(found)
-        del self.wait_list[index]
-
-    def find_token(self, acc_name: str) -> ValidToken | None:
-        found = [item for item in self.token_list if item.acc_name == acc_name]
-        if not found:
-            return None
-        if len(found) == 1:
-            return found[0]
-        raise Exception("Need to deal with multiple concurrent auth requests")
+            await asyncio.sleep(80)
 
 
 GLOBAL_LISTS: AllLists = AllLists()

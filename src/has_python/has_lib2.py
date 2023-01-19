@@ -66,17 +66,6 @@ class KeyType(str, Enum):
     memo = "memo"
 
 
-class HASMessage(BaseModel):
-    cmd: CmdType
-
-
-class HASCommon(HASMessage):
-    """Common data across all sending classes"""
-
-    hive_acc: str
-    key_type: KeyType = KeyType.posting
-
-
 class ChallengeHAS(BaseModel):
     key_type: KeyType = KeyType.posting
     challenge: str
@@ -114,6 +103,10 @@ class AuthDataHAS(BaseModel):
     @property
     def encrypted_b64(self) -> bytes:
         return js_encrypt(self.bytes, str_bytes(self.auth_key))
+
+
+class HASMessage(BaseModel):
+    cmd: CmdType
 
 
 class AuthReqHAS(HASMessage):
@@ -179,10 +172,11 @@ class AuthAckHAS(HASMessage):
         """Validates an authentication and challenge"""
         # Find the matching index of ACK_WAIT_LIST
         auth_wait = GLOBAL_LISTS.find_wait(self.uuid)
+        GLOBAL_LISTS.del_wait(auth_wait)
         # Hmmm not sure about this assumption
         auth_object = GLOBAL_LISTS.find_auth(auth_wait.account)
-        # del ACK_WAIT_LIST[index]
-        # del AUTH_LIST[index]
+        GLOBAL_LISTS.del_auth(auth_object)
+
         if auth_object.acc_name != auth_wait.account:
             raise
         data_bytes = self.data.encode("utf-8")
@@ -221,8 +215,14 @@ class AuthAckDataHAS(BaseModel):
     challenge: ChallengeHAS = None
 
 
+class HASCommon(HASMessage):
+    """Common data across all sending classes"""
+
+    hive_acc: str
+    key_type: KeyType = KeyType.posting
+
+
 class ConnectedHAS(HASMessage):
-    cmd: str
     server: str
     socketid: str
     timeout: int
@@ -230,6 +230,18 @@ class ConnectedHAS(HASMessage):
     version: str
     protocol: float
     received: datetime = datetime.now(tz=timezone.utc)
+
+
+class SignReqHAS(HASMessage):
+    account: str
+    token: str
+    data: str
+    auth_key: UUID
+
+
+class SignWaitHAS(HASMessage):
+    uuid: UUID
+    expire: datetime
 
 
 class AuthObjectHAS(BaseModel):
@@ -302,20 +314,6 @@ class SignDataHAS(BaseModel):
         return js_encrypt(self.bytes, str_bytes(auth_key))
 
 
-class SignReqHAS(BaseModel):
-    cmd: CmdType = CmdType.sign_req
-    account: str
-    token: str
-    data: str
-    auth_key: UUID
-
-
-class SignWaitHAS(BaseModel):
-    cmd: CmdType = CmdType.sign_wait
-    uuid: UUID
-    expirt: datetime
-
-
 async def socket_listen(has_socket):
     """
     Listen to a socket and act on what is received.
@@ -324,7 +322,7 @@ async def socket_listen(has_socket):
         while True:
             msg = await has_socket.recv()
             cmd = HASMessage.parse_raw(msg)
-            logging.info(f"-------> Recivied: {cmd}")
+            logging.info(f"<------ Recivied: {cmd}")
             logging.info(msg)
             match cmd.cmd:
                 case CmdType.connected:
@@ -353,17 +351,21 @@ async def socket_listen(has_socket):
                 case CmdType.sign_wait:
                     sign_wait = SignWaitHAS.parse_raw(msg)
                     logging.info(
-                        f"********** Alert User to authorise transaction {sign_wait.uuid}"
+                        f"****** Alert User to authorise transaction {sign_wait.uuid}"
                     )
 
                 case CmdType.auth_ack:
                     auth_ack = AuthAckHAS.parse_raw(msg)
                     logging.debug(auth_ack)
                     auth_ack.validate()
+                case CmdType.sign_error:
+                    logging.info("Sign Error")
+
             if has_socket.closed:
                 break
 
-    except (ValidationError, KeyError):
+    except (ValidationError, KeyError) as ex:
+        logging.error(ex)
         pass
     except websockets.exceptions.ConnectionClosed as ex:
         logging.warning(ex)
@@ -375,8 +377,14 @@ async def execute_tasks(has_socket):
     """Watches the task Queue"""
     while True:
         msg: HASMessage = await TASK_QUEUE.get()
-        await has_socket.send(msg.json(exclude_none=True))
-        logging.info(f"<------ Sent:   {msg.cmd}")
+        try:
+            await has_socket.send(msg.json(exclude_none=True))
+        except Exception as ex:
+            logging.exception(ex)
+            logging.info("Putting the msg back int the Queue")
+            await TASK_QUEUE.put(msg)
+
+        logging.info(f"------> Sent:   {msg.cmd}")
 
 
 async def main_loop():
@@ -393,7 +401,7 @@ async def main_loop():
 
 
 async def test_send_auth_req():
-    for acc in ["v4vapp.dev", "brianoflondon"]:  # ,'brianoflondon']:
+    for acc in ["v4vapp.dev"]:  # ,'brianoflondon']:
         # await asyncio.sleep(3)
         use_pksa_key = False
         if acc == "v4vapp.dev":
@@ -409,7 +417,7 @@ async def test_send_auth_req():
 
 
 async def test_send_transaction():
-    test_account = "brianoflondon"
+    test_account = "v4vapp.dev"
     # find valid Token
     while True:
         await asyncio.sleep(5)
@@ -432,6 +440,7 @@ async def test_send_transaction():
                 broadcast=True,
             )
             sign_req = SignReqHAS(
+                cmd=CmdType.sign_req,
                 account=valid_token.acc_name,
                 token=valid_token.token,
                 auth_key=valid_token.auth_key,
@@ -454,11 +463,21 @@ class AllLists(BaseModel):
             return found[0]
         raise Exception("Need to deal with multiple concurrent auth requests")
 
+    def del_auth(self, found: AuthObjectHAS):
+        """Finda auth item and deletes it"""
+        index = self.auth_list.index(found)
+        del self.auth_list[index]
+
     def find_wait(self, uuid: UUID) -> AuthWaitHAS:
         found = [item for item in self.wait_list if item.uuid == uuid]
         if len(found) == 1:
             return found[0]
         raise Exception("Need to deal with multiple concurrent auth requests")
+
+    def del_wait(self, found: AuthWaitHAS):
+        """Finds a waiting item and deletes it"""
+        index = self.wait_list.index(found)
+        del self.wait_list[index]
 
     def find_token(self, acc_name: str) -> ValidToken | None:
         found = [item for item in self.token_list if item.acc_name == acc_name]

@@ -26,7 +26,7 @@ from has_python.hive_validation import (
 from has_python.jscrypt_encode_for_python import js_decrypt, js_encrypt
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
 )
 logging.getLogger("graphenerpc").setLevel(logging.ERROR)
@@ -380,7 +380,7 @@ async def main_loop():
             socket_listen(has_socket),
             execute_tasks(has_socket),
             test_send_auth_req(),
-            # test_send_transaction(),
+            test_send_transaction(),
         ]
         answers = await asyncio.gather(*tasks)
 
@@ -402,36 +402,38 @@ async def test_send_auth_req():
 
 
 async def test_send_transaction():
-    test_account = "v4vapp.dev"
+    test_account = "v4vapp"
     # find valid Token
-    await asyncio.sleep(5)
-    valid_tokens = [vt for vt in VALID_TOKEN_LIST if vt.acc_name == test_account]
-    if valid_tokens:
-        valid_token = valid_tokens[0]
-        payload = {"HAS": "testing"}
-        payload_json = json.dumps(payload, separators=(",", ":"), default=str)
-        op = Operation(
-            "custom_json",
-            {
-                "required_auths": [],
-                "required_posting_auths": [test_account],
-                "id": "v4vapp_has_testing",
-                "json": payload_json,
-            },
-        )
-        sign_data = SignDataHAS(
-            key_type=KeyType.posting,
-            ops=[op.to_dict()],
-            broadcast=True,
-        )
-        sign_req = SignReqHAS(
-            account=valid_token.acc_name,
-            token=valid_token.token,
-            auth_key=valid_token.auth_key,
-            data=sign_data.encrypted_b64(valid_token.auth_key),
-        )
-        AUTH_LIST.append(sign_req)
-        await TASK_QUEUE.put(sign_req)
+    while True:
+        await asyncio.sleep(5)
+        valid_tokens = [vt for vt in VALID_TOKEN_LIST if vt.acc_name == test_account]
+        if valid_tokens:
+            valid_token = valid_tokens[0]
+            payload = {"HAS": "testing"}
+            payload_json = json.dumps(payload, separators=(",", ":"), default=str)
+            op = Operation(
+                "custom_json",
+                {
+                    "required_auths": [],
+                    "required_posting_auths": [test_account],
+                    "id": "v4vapp_has_testing",
+                    "json": payload_json,
+                },
+            )
+            sign_data = SignDataHAS(
+                key_type=KeyType.posting,
+                ops=[op.to_dict()],
+                broadcast=True,
+            )
+            sign_req = SignReqHAS(
+                account=valid_token.acc_name,
+                token=valid_token.token,
+                auth_key=valid_token.auth_key,
+                data=sign_data.encrypted_b64(valid_token.auth_key),
+            )
+            AUTH_LIST.append(sign_req)
+            await TASK_QUEUE.put(sign_req)
+            break
 
 class AuthList(BaseModel):
     auth_list: List[AuthObjectHAS] = []

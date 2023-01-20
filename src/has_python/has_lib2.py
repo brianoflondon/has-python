@@ -5,7 +5,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Type
+from typing import Any, List
 from uuid import UUID, uuid4
 
 import requests
@@ -26,7 +26,7 @@ from has_python.hive_validation import (
 from has_python.jscrypt_encode_for_python import js_decrypt, js_encrypt
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
 )
 logging.getLogger("graphenerpc").setLevel(logging.ERROR)
@@ -46,6 +46,10 @@ def str_bytes(uuid: UUID) -> bytes:
     return str(uuid).encode("utf-8")
 
 
+class HiveVerificationFailure(Exception):
+    pass
+
+
 class CmdType(str, Enum):
     connected = "connected"
     auth_req = "auth_req"
@@ -57,7 +61,7 @@ class CmdType(str, Enum):
     sign_wait = "sign_wait"
     sign_ack = "sign_ack"
     sign_nack = "sign_nack"
-    sign_error = "sign_error"
+    sign_err = "sign_err"
 
 
 class KeyType(str, Enum):
@@ -168,45 +172,16 @@ class AuthAckHAS(HASMessage):
     uuid: UUID
     data: str
 
-    def validate(self):
-        """Validates an authentication and challenge"""
-        # Find the matching index of ACK_WAIT_LIST
-        auth_wait = GLOBAL_LISTS.find_wait(self.uuid)
-        GLOBAL_LISTS.del_wait(auth_wait)
-        # Hmmm not sure about this assumption
-        auth_object = GLOBAL_LISTS.find_auth(auth_wait.account)
-        GLOBAL_LISTS.del_auth(auth_object)
+    def validate_hive(self):
+        validate_hive_auth_req(self.uuid, self.data)
 
-        if auth_object.acc_name != auth_wait.account:
-            raise
-        data_bytes = self.data.encode("utf-8")
-        data_string = js_decrypt(
-            data_bytes, str_bytes(auth_object.auth_data.auth_key)
-        ).decode("utf-8")
-        auth_ack_data = AuthAckDataHAS.parse_raw(data_string)
-        logging.info(auth_ack_data)
-        logging.info(f"Token: {auth_ack_data.token}")
-        signed_answer = SignedAnswer(
-            result=auth_ack_data.challenge.challenge,
-            request_id=1,
-            publicKey=auth_ack_data.challenge.pubkey,
-            data=SignedAnswerData(
-                _type="HAS",
-                username=auth_object.auth_req.account,
-                message=auth_object.auth_data.challenge.challenge,
-                method=auth_object.auth_data.challenge.key_type,
-                key=auth_object.auth_data.challenge.key_type,
-            ),
-        )
-        verification = validate_hivekeychain_ans(signed_answer)
-        if verification.success:
-            valid_token = ValidToken(
-                acc_name=verification.acc_name,
-                token=auth_ack_data.token,
-                exipre=auth_ack_data.expire,
-                auth_key=auth_object.auth_data.auth_key,
-            )
-            GLOBAL_LISTS.token_list.append(valid_token)
+
+class AuthNackHAS(HASMessage):
+    uuid: UUID
+    data: str
+
+    def validate_hive(self):
+        validate_hive_auth_req(self.uuid, self.data)
 
 
 class AuthAckDataHAS(BaseModel):
@@ -217,13 +192,24 @@ class AuthAckDataHAS(BaseModel):
 
 class SignAckHAS(HASMessage):
     uuid: UUID
-    broadcast: bool
+    broadcast: bool = True
     data: Any
 
 
 class SignNackHAS(HASMessage):
     uuid: UUID
-    data: str
+    error: str
+
+    def validate_hive(self):
+        validate_hive_sign_req(self.uuid, self.error)
+
+
+class SignErrHAS(HASMessage):
+    uuid: UUID
+    error: str
+
+    def validate_hive(self):
+        validate_hive_sign_req(self.uuid, self.error)
 
 
 class ConnectedHAS(HASMessage):
@@ -262,6 +248,117 @@ class ValidToken(BaseModel):
     auth_key: UUID
 
 
+class SignDataHAS(BaseModel):
+    key_type: KeyType
+    ops: list
+    broadcast: bool
+
+    @property
+    def bytes(self):
+        """
+        Return object as json string in bytes: does not include the `auth_key_uuid`
+        Also needs to carefully encode ops only once.
+        """
+        # self_dict = self.dict(exclude={"auth_key_uuid"})
+        json_data = json.dumps(self.dict())
+        encoded_bytes = json_data.encode("utf-8")
+        return encoded_bytes
+
+    def encrypted_b64(self, auth_key) -> bytes:
+        return js_encrypt(self.bytes, str_bytes(auth_key))
+
+
+class AllLists(BaseModel):
+    auth_list: List[AuthObjectHAS] = []
+    wait_list: List[AuthWaitHAS | SignWaitHAS] = []
+    token_list: List[ValidToken] = []
+
+    def find_auth(self, acc_name: str) -> AuthObjectHAS:
+        found = [item for item in self.auth_list if item.acc_name == acc_name]
+        if len(found) == 1:
+            return found[0]
+        raise Exception("Need to deal with multiple concurrent auth requests")
+
+    def del_auth(self, found: AuthObjectHAS):
+        """Finda auth item and deletes it"""
+        index = self.auth_list.index(found)
+        del self.auth_list[index]
+
+    def find_wait(self, uuid: UUID) -> AuthWaitHAS | SignWaitHAS:
+        found = [item for item in self.wait_list if item.uuid == uuid]
+        if len(found) == 1:
+            return found[0]
+        raise Exception("Need to deal with multiple concurrent auth requests")
+
+    def del_wait(self, found: AuthWaitHAS):
+        """Finds a waiting item and deletes it"""
+        index = self.wait_list.index(found)
+        del self.wait_list[index]
+
+    def find_token(self, acc_name: str) -> ValidToken | None:
+        found = [item for item in self.token_list if item.acc_name == acc_name]
+        if not found:
+            return None
+        if len(found) == 1:
+            return found[0]
+        raise Exception("Need to deal with multiple concurrent auth requests")
+
+
+def validate_hive_sign_req(uuid: UUID, data: str):
+    sign_wait = GLOBAL_LISTS.find_wait(uuid)
+    GLOBAL_LISTS.del_wait(sign_wait)
+    # This is harder than it looks as we have to figure out which
+    # request is giving the error.
+
+
+def validate_hive_auth_req(uuid: UUID, data: str):
+    """Validates an authentication and challenge"""
+    # Find the matching index of ACK_WAIT_LIST
+    auth_wait = GLOBAL_LISTS.find_wait(uuid)
+    GLOBAL_LISTS.del_wait(auth_wait)
+    # Hmmm not sure about this assumption
+    auth_object = GLOBAL_LISTS.find_auth(auth_wait.account)
+    GLOBAL_LISTS.del_auth(auth_object)
+
+    if auth_object.acc_name != auth_wait.account:
+        raise HiveVerificationFailure()
+    data_bytes = data.encode("utf-8")
+    data_string = js_decrypt(
+        data_bytes, str_bytes(auth_object.auth_data.auth_key)
+    ).decode("utf-8")
+    # If AuthNack the datastring is a UUID:
+    try:
+        check_uuid = UUID(data_string)
+        if check_uuid == uuid:
+            logging.info("Integrity Check good: Authorisation rejected")
+            return
+    except ValueError:
+        auth_ack_data = AuthAckDataHAS.parse_raw(data_string)
+    logging.info(auth_ack_data)
+    logging.info(f"Token: {auth_ack_data.token}")
+    signed_answer = SignedAnswer(
+        result=auth_ack_data.challenge.challenge,
+        request_id=1,
+        publicKey=auth_ack_data.challenge.pubkey,
+        data=SignedAnswerData(
+            _type="HAS",
+            username=auth_object.auth_req.account,
+            message=auth_object.auth_data.challenge.challenge,
+            method=auth_object.auth_data.challenge.key_type,
+            key=auth_object.auth_data.challenge.key_type,
+        ),
+    )
+    verification = validate_hivekeychain_ans(signed_answer)
+    if verification.success:
+        valid_token = ValidToken(
+            acc_name=verification.acc_name,
+            token=auth_ack_data.token,
+            exipre=auth_ack_data.expire,
+            auth_key=auth_object.auth_data.auth_key,
+        )
+        GLOBAL_LISTS.token_list.append(valid_token)
+
+
 async def build_auth_req_challenge(
     acc_name: str,
     key_type: KeyType,
@@ -298,68 +395,12 @@ async def build_auth_req_challenge(
     return AuthObjectHAS(acc_name=acc_name, auth_data=auth_data, auth_req=auth_req)
 
 
-class SignDataHAS(BaseModel):
-    key_type: KeyType
-    ops: list
-    broadcast: bool
-
-    @property
-    def bytes(self):
-        """
-        Return object as json string in bytes: does not include the `auth_key_uuid`
-        Also needs to carefully encode ops only once.
-        """
-        # self_dict = self.dict(exclude={"auth_key_uuid"})
-        json_data = json.dumps(self.dict())
-        encoded_bytes = json_data.encode("utf-8")
-        return encoded_bytes
-
-    def encrypted_b64(self, auth_key) -> bytes:
-        return js_encrypt(self.bytes, str_bytes(auth_key))
-
-
-class AllLists(BaseModel):
-    auth_list: List[AuthObjectHAS] = []
-    wait_list: List[AuthWaitHAS] = []
-    token_list: List[ValidToken] = []
-
-    def find_auth(self, acc_name: str) -> AuthObjectHAS:
-        found = [item for item in self.auth_list if item.acc_name == acc_name]
-        if len(found) == 1:
-            return found[0]
-        raise Exception("Need to deal with multiple concurrent auth requests")
-
-    def del_auth(self, found: AuthObjectHAS):
-        """Finda auth item and deletes it"""
-        index = self.auth_list.index(found)
-        del self.auth_list[index]
-
-    def find_wait(self, uuid: UUID) -> AuthWaitHAS:
-        found = [item for item in self.wait_list if item.uuid == uuid]
-        if len(found) == 1:
-            return found[0]
-        raise Exception("Need to deal with multiple concurrent auth requests")
-
-    def del_wait(self, found: AuthWaitHAS):
-        """Finds a waiting item and deletes it"""
-        index = self.wait_list.index(found)
-        del self.wait_list[index]
-
-    def find_token(self, acc_name: str) -> ValidToken | None:
-        found = [item for item in self.token_list if item.acc_name == acc_name]
-        if not found:
-            return None
-        if len(found) == 1:
-            return found[0]
-        raise Exception("Need to deal with multiple concurrent auth requests")
-
-
 async def socket_listen(has_socket):
     """
     Listen to a socket and act on what is received.
     """
-    try:
-        while True:
+    while True:
+        try:
             msg = await has_socket.recv()
             cmd = HASMessage.parse_raw(msg)
             logging.info(f"<------ Recivied: {cmd}")
@@ -393,62 +434,90 @@ async def socket_listen(has_socket):
                     logging.info(
                         f"****** Alert User to authorise transaction {sign_wait.uuid}"
                     )
+                    GLOBAL_LISTS.wait_list.append(sign_wait)
                 case CmdType.auth_ack:
                     auth_ack = AuthAckHAS.parse_raw(msg)
                     logging.debug(auth_ack)
-                    auth_ack.validate()
+                    auth_ack.validate_hive()
+                case CmdType.auth_nack:
+                    auth_nack = AuthNackHAS.parse_raw(msg)
+                    logging.debug(auth_nack)
+                    auth_nack.validate_hive()
                 case CmdType.sign_ack:
                     sign_ack = SignAckHAS.parse_raw(msg)
+                    if sign_ack.broadcast:
+                        logging.info(f"Transaction broadcast to Hive: {sign_ack.data}")
 
                 case CmdType.sign_nack:
                     sign_nack = SignNackHAS.parse_raw(msg)
+                    sign_nack.validate_hive()
 
-                case CmdType.sign_error:
+                case CmdType.sign_err:
                     logging.info("Sign Error")
+                    sign_err = SignErrHAS.parse_raw(msg)
+                    sign_err.validate_hive()
+                    logging.info(f"Sign Error: {sign_err.error}")
 
             if has_socket.closed:
                 break
 
-    except (ValidationError, KeyError) as ex:
-        logging.error(ex)
-        pass
-    except websockets.exceptions.ConnectionClosed as ex:
-        logging.warning(ex)
-    except Exception as ex:
-        logging.exception(ex)
+        except (ValidationError, KeyError) as ex:
+            logging.error(ex)
+            pass
+        except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionResetError) as ex:
+            logging.warning(ex)
+            raise
+        except Exception as ex:
+            logging.exception(ex)
 
 
 async def execute_tasks(has_socket):
     """Watches the task Queue"""
     while True:
-        msg: HASMessage = await TASK_QUEUE.get()
         try:
+            msg: HASMessage = await TASK_QUEUE.get()
             await has_socket.send(msg.json(exclude_none=True))
+            logging.info(f"------> Sent:   {msg.cmd}")
             await asyncio.sleep(0.1)
-        except Exception as ex:
-            await asyncio.sleep(1)
-            logging.exception(ex)
+        except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionResetError) as ex:
+            logging.warning(ex)
             logging.info("Putting the msg back int the Queue")
             await TASK_QUEUE.put(msg)
+            raise
+        except Exception as ex:
+            logging.exception(ex)
 
-        logging.info(f"------> Sent:   {msg.cmd}")
+
+async def manage_websocket():
+    while True:
+        async with websockets.connect(HAS_SERVER) as has_socket:
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    listen = tg.create_task(socket_listen(has_socket))
+                    execute = tg.create_task(execute_tasks(has_socket))
+            except (
+                websockets.exceptions.ConnectionClosed,
+                websockets.exceptions.ConnectionResetError,
+            ) as ex:
+                logging.warning(ex)
+                break
+            except Exception as ex:
+                logging.exception(ex)
 
 
 async def main_loop():
-    async with websockets.connect(HAS_SERVER) as has_socket:
-        tasks = [
-            socket_listen(has_socket),
-            execute_tasks(has_socket),
-            test_send_auth_req(),
-            test_send_transaction(),
-            # test_send_transaction(),
-            # test_send_transaction(),
-        ]
-        answers = await asyncio.gather(*tasks)
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(manage_websocket())
+        tg.create_task(test_send_auth_req())
+        tg.create_task(test_send_transaction())
+
+
+target = "v4vapp.dev"
 
 
 async def test_send_auth_req():
-    for acc in ["hivehydra"]:  # ,'brianoflondon']:
+    await asyncio.sleep(10)
+    for acc in [target]:  # ,'brianoflondon']:
         # await asyncio.sleep(3)
         use_pksa_key = False
         if acc == "v4vapp.dev":
@@ -464,10 +533,11 @@ async def test_send_auth_req():
 
 
 async def test_send_transaction():
-    test_account = "hivehydra"
+    await asyncio.sleep(20)
+    test_account = target
     # find valid Token
-    await asyncio.sleep(70)
     for i in range(10):
+        await asyncio.sleep(5)
         valid_token = GLOBAL_LISTS.find_token(test_account)
         if valid_token:
             payload = {"HAS": f"{i} - testing", "timestamp": str(datetime.now())}
@@ -496,7 +566,7 @@ async def test_send_transaction():
             logging.info(sign_req)
             GLOBAL_LISTS.auth_list.append(sign_req)
             await TASK_QUEUE.put(sign_req)
-            await asyncio.sleep(80)
+            await asyncio.sleep(30 + i * 10)
 
 
 GLOBAL_LISTS: AllLists = AllLists()

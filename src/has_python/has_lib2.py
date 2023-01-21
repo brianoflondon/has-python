@@ -3,7 +3,7 @@ import base64
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, List
 from uuid import UUID, uuid4
@@ -28,6 +28,7 @@ from has_python.jscrypt_encode_for_python import js_decrypt, js_encrypt
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
+    encoding="utf-8",
 )
 logging.getLogger("graphenerpc").setLevel(logging.ERROR)
 
@@ -273,6 +274,17 @@ class AllLists(BaseModel):
     wait_list: List[AuthWaitHAS | SignWaitHAS] = []
     token_list: List[ValidToken] = []
 
+    def purge_expired(self):
+        """Check for epired waiting objects and tokens"""
+        for list in [self.wait_list, self.token_list]:
+            for item in list:
+                if item.expire:
+                    expires_in = item.expire - datetime.now(tz=timezone.utc)
+                    if expires_in < timedelta(seconds=0):
+                        del item
+                    else:
+                        logging.debug(f"{item.cmd} expires in {expires_in}")
+
     def find_auth(self, acc_name: str) -> AuthObjectHAS:
         found = [item for item in self.auth_list if item.acc_name == acc_name]
         if len(found) == 1:
@@ -447,11 +459,9 @@ async def socket_listen(has_socket):
                     sign_ack = SignAckHAS.parse_raw(msg)
                     if sign_ack.broadcast:
                         logging.info(f"Transaction broadcast to Hive: {sign_ack.data}")
-
                 case CmdType.sign_nack:
                     sign_nack = SignNackHAS.parse_raw(msg)
                     sign_nack.validate_hive()
-
                 case CmdType.sign_err:
                     logging.info("Sign Error")
                     sign_err = SignErrHAS.parse_raw(msg)
@@ -464,11 +474,16 @@ async def socket_listen(has_socket):
         except (ValidationError, KeyError) as ex:
             logging.error(ex)
             pass
-        except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionResetError) as ex:
+        except (
+            websockets.exceptions.ConnectionClosedError,
+            ConnectionError,
+            ConnectionResetError,
+        ) as ex:
             logging.warning(ex)
-            raise
+            break
         except Exception as ex:
             logging.exception(ex)
+            raise
 
 
 async def execute_tasks(has_socket):
@@ -479,13 +494,25 @@ async def execute_tasks(has_socket):
             await has_socket.send(msg.json(exclude_none=True))
             logging.info(f"------> Sent:   {msg.cmd}")
             await asyncio.sleep(0.1)
-        except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionResetError) as ex:
+        except (
+            websockets.exceptions.ConnectionClosedError,
+            ConnectionError,
+            ConnectionResetError,
+        ) as ex:
             logging.warning(ex)
             logging.info("Putting the msg back int the Queue")
             await TASK_QUEUE.put(msg)
-            raise
+            break
         except Exception as ex:
             logging.exception(ex)
+            raise
+
+
+async def global_list_purge():
+    """Check the global list for expired waits"""
+    while True:
+        GLOBAL_LISTS.purge_expired()
+        await asyncio.sleep(10)
 
 
 async def manage_websocket():
@@ -496,13 +523,15 @@ async def manage_websocket():
                     listen = tg.create_task(socket_listen(has_socket))
                     execute = tg.create_task(execute_tasks(has_socket))
             except (
-                websockets.exceptions.ConnectionClosed,
-                websockets.exceptions.ConnectionResetError,
+                websockets.exceptions.ConnectionClosedError,
+                ConnectionError,
+                ConnectionResetError,
             ) as ex:
                 logging.warning(ex)
                 break
             except Exception as ex:
                 logging.exception(ex)
+                break
 
 
 async def main_loop():
@@ -510,6 +539,7 @@ async def main_loop():
         tg.create_task(manage_websocket())
         tg.create_task(test_send_auth_req())
         tg.create_task(test_send_transaction())
+        tg.create_task(global_list_purge())
 
 
 target = "v4vapp.dev"
@@ -536,7 +566,7 @@ async def test_send_transaction():
     await asyncio.sleep(20)
     test_account = target
     # find valid Token
-    for i in range(10):
+    for i in range(100):
         await asyncio.sleep(5)
         valid_token = GLOBAL_LISTS.find_token(test_account)
         if valid_token:
@@ -566,7 +596,7 @@ async def test_send_transaction():
             logging.info(sign_req)
             GLOBAL_LISTS.auth_list.append(sign_req)
             await TASK_QUEUE.put(sign_req)
-            await asyncio.sleep(30 + i * 10)
+            await asyncio.sleep(60 + i * 10)
 
 
 GLOBAL_LISTS: AllLists = AllLists()

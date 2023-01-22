@@ -1,16 +1,15 @@
-from datetime import datetime
 import json
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
 from has_python.has_lib2 import (
-    ChallengeHAS,
     CmdType,
+    HASApp,
     HASMessage,
     HASWait,
-    HASApp,
     build_auth_req_challenge,
 )
 
@@ -46,5 +45,11 @@ def test_has_message():
 
 
 def test_has_wait():
-    hw = HASWait(expire=datetime.now())
+    hw = HASWait(cmd=CmdType.auth_wait, expire=datetime.now())
     assert hw
+    hw = HASWait(cmd=CmdType.sign_wait, expire=datetime.now())
+    assert hw
+    try:
+        hw = HASWait(cmd=CmdType.sign_ack, expire=datetime.now())
+    except ValidationError:
+        assert True

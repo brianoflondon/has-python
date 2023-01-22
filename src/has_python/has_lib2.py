@@ -13,7 +13,7 @@ import requests
 import websockets
 from dotenv import load_dotenv
 from PIL import ImageDraw, ImageFont
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, validator
 from qrcode import QRCode
 from qrcode.constants import ERROR_CORRECT_H
 from qrcode.image.styledpil import StyledPilImage
@@ -117,11 +117,26 @@ class AuthDataHAS(BaseModel):
 
 
 class HASMessage(BaseModel):
-    cmd: CmdType
+    cmd: CmdType | None
 
 
-class HASWait(BaseModel):
+class HASWait(HASMessage):
     expire: datetime
+    uuid: UUID | None
+    account: str | None
+
+    @validator('cmd')
+    def cmd_must_be(cls, v):
+        if v not in [CmdType.auth_wait, CmdType.sign_wait]:
+            raise ValueError('Not a Waiting Cmd type')
+        return v
+# class SignWaitHAS(HASMessage, HASWait):
+#     uuid: UUID
+
+
+# class AuthWaitHAS(HASWait):
+#     uuid: UUID
+#     account: str
 
 
 class AuthReqHAS(HASMessage):
@@ -129,11 +144,6 @@ class AuthReqHAS(HASMessage):
     data: str
     token: UUID | None
     auth_key: str | None
-
-
-class AuthWaitHAS(HASWait):
-    uuid: UUID
-    account: str
 
 
 class AuthPayloadHAS(BaseModel):
@@ -238,11 +248,6 @@ class SignReqHAS(HASMessage):
     auth_key: UUID
 
 
-class SignWaitHAS(HASMessage):
-    uuid: UUID
-    expire: datetime
-
-
 class AuthObjectHAS(BaseModel):
     acc_name: str
     auth_data: AuthDataHAS
@@ -280,7 +285,7 @@ class SignDataHAS(BaseModel):
 class AllLists(BaseModel):
     # items: List[AuthObjectHAS | ]
     auth_list: List[AuthObjectHAS] = []
-    wait_list: List[AuthWaitHAS | SignWaitHAS] = []
+    wait_list: List[HASWait] = []
     token_list: List[ValidToken] = []
 
     def purge_expired(self):
@@ -305,13 +310,13 @@ class AllLists(BaseModel):
         index = self.auth_list.index(found)
         del self.auth_list[index]
 
-    def find_wait(self, uuid: UUID) -> AuthWaitHAS | SignWaitHAS:
+    def find_wait(self, uuid: UUID) -> HASWait:
         found = [item for item in self.wait_list if item.uuid == uuid]
         if len(found) == 1:
             return found[0]
         raise Exception("Need to deal with multiple concurrent auth requests")
 
-    def del_wait(self, found: AuthWaitHAS):
+    def del_wait(self, found: HASWait):
         """Finds a waiting item and deletes it"""
         index = self.wait_list.index(found)
         del self.wait_list[index]
@@ -432,7 +437,7 @@ async def socket_listen(has_socket):
                     processed.socketid
                     logging.info(processed)
                 case CmdType.auth_wait:
-                    auth_wait = AuthWaitHAS.parse_raw(msg)
+                    auth_wait = HASWait.parse_raw(msg)
                     # Display QR Code
                     auth_payload = AuthPayloadHAS(
                         account=auth_wait.account,
@@ -449,9 +454,8 @@ async def socket_listen(has_socket):
                         img.show()
                     GLOBAL_LISTS.wait_list.append(auth_wait)
                     logging.info(auth_wait)
-
                 case CmdType.sign_wait:
-                    sign_wait = SignWaitHAS.parse_raw(msg)
+                    sign_wait = HASWait.parse_raw(msg)
                     logging.info(
                         f"****** Alert User to authorise transaction {sign_wait.uuid}"
                     )
@@ -551,7 +555,7 @@ async def main_loop():
         tg.create_task(global_list_purge())
 
 
-target = "v4vapp"
+target = "v4vapp.dev"
 
 
 async def test_send_auth_req():

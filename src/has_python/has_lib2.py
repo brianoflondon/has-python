@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, List
@@ -25,12 +26,16 @@ from has_python.hive_validation import (
 )
 from has_python.jscrypt_encode_for_python import js_decrypt, js_encrypt
 
+logging.getLogger("beemapi.graphenerpc").setLevel(logging.ERROR)
+logging.getLogger("beemapi.node").setLevel(logging.ERROR)
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
     encoding="utf-8",
+    stream=sys.stdout,
 )
-logging.getLogger("graphenerpc").setLevel(logging.ERROR)
+
 
 load_dotenv()
 HAS_SERVER = "wss://hive-auth.arcange.eu"
@@ -102,8 +107,9 @@ class AuthDataHAS(BaseModel):
 
     @property
     def bytes(self):
-        """Return object as json string in bytes: does not include the `auth_key_uuid`"""
-        return json.dumps(self.dict(exclude={"auth_key"})).encode("utf-8")
+        """Return object as json string in bytes: does not include the `auth_key_uuid`
+        also convert the token UUID if it exists to str"""
+        return json.dumps(self.dict(exclude={"auth_key"}), default=str).encode("utf-8")
 
     @property
     def encrypted_b64(self) -> bytes:
@@ -114,6 +120,10 @@ class HASMessage(BaseModel):
     cmd: CmdType
 
 
+class HASWait(BaseModel):
+    expire: datetime
+
+
 class AuthReqHAS(HASMessage):
     account: str
     data: str
@@ -121,9 +131,8 @@ class AuthReqHAS(HASMessage):
     auth_key: str | None
 
 
-class AuthWaitHAS(HASMessage):
+class AuthWaitHAS(HASWait):
     uuid: UUID
-    expire: datetime
     account: str
 
 
@@ -185,9 +194,8 @@ class AuthNackHAS(HASMessage):
         validate_hive_auth_req(self.uuid, self.data)
 
 
-class AuthAckDataHAS(BaseModel):
+class AuthAckDataHAS(HASWait):
     token: UUID
-    expire: datetime
     challenge: ChallengeHAS = None
 
 
@@ -242,10 +250,10 @@ class AuthObjectHAS(BaseModel):
     timestamp: datetime = datetime.now(tz=timezone.utc)
 
 
-class ValidToken(BaseModel):
+class ValidToken(HASWait):
     acc_name: str
     token: UUID
-    exipre: datetime
+    expire: datetime
     auth_key: UUID
 
 
@@ -270,6 +278,7 @@ class SignDataHAS(BaseModel):
 
 
 class AllLists(BaseModel):
+    # items: List[AuthObjectHAS | ]
     auth_list: List[AuthObjectHAS] = []
     wait_list: List[AuthWaitHAS | SignWaitHAS] = []
     token_list: List[ValidToken] = []
@@ -283,7 +292,7 @@ class AllLists(BaseModel):
                     if expires_in < timedelta(seconds=0):
                         del item
                     else:
-                        logging.debug(f"{item.cmd} expires in {expires_in}")
+                        logging.debug(f"Expires in {expires_in} | {item}")
 
     def find_auth(self, acc_name: str) -> AuthObjectHAS:
         found = [item for item in self.auth_list if item.acc_name == acc_name]
@@ -365,7 +374,7 @@ def validate_hive_auth_req(uuid: UUID, data: str):
         valid_token = ValidToken(
             acc_name=verification.acc_name,
             token=auth_ack_data.token,
-            exipre=auth_ack_data.expire,
+            expire=auth_ack_data.expire,
             auth_key=auth_object.auth_data.auth_key,
         )
         GLOBAL_LISTS.token_list.append(valid_token)
@@ -542,7 +551,7 @@ async def main_loop():
         tg.create_task(global_list_purge())
 
 
-target = "v4vapp.dev"
+target = "v4vapp"
 
 
 async def test_send_auth_req():

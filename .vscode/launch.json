@@ -21,7 +21,7 @@
             "request": "launch",
             "program": "src/has_python/cli/has.py",
             "args": [
-                "v4vapp",
+                "v4vapp.dev",
                 "--key-type",
                 "posting",
                 // "--token",

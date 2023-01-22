@@ -6,7 +6,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, List
+from typing import Any, List, Tuple
 from uuid import UUID, uuid4
 
 import requests
@@ -59,6 +59,9 @@ class HiveVerificationFailure(Exception):
 class CmdType(str, Enum):
     connected = "connected"
     auth_req = "auth_req"
+    challenge_req = "challenge_req"
+    challenge_wait = "challenge_wait"
+    challenge_ack = "challenge_ack"
     auth_wait = "auth_wait"
     auth_ack = "auth_ack"
     auth_nack = "auth_nack"
@@ -76,6 +79,14 @@ class KeyType(str, Enum):
     memo = "memo"
 
 
+class ValidToken(BaseModel):
+    expire: datetime
+    acc_name: str
+    token: UUID
+    expire: datetime
+    auth_key: UUID
+
+
 class ChallengeHAS(BaseModel):
     key_type: KeyType = KeyType.posting
     challenge: str
@@ -91,6 +102,15 @@ class ChallengeHAS(BaseModel):
         if "key_type" in data.keys() and data.get("key_type") is None:
             del data["key_type"]
         super().__init__(**data)
+
+    @property
+    def bytes(self):
+        """Return object as json string in bytes: does not include the `auth_key_uuid`
+        also convert the token UUID if it exists to str"""
+        return json.dumps(self.dict(exclude={"pub_key"}), default=str).encode("utf-8")
+
+    def encrypted_b64(self, auth_key: UUID) -> bytes:
+        return js_encrypt(self.bytes, str_bytes(auth_key))
 
 
 class HASApp(BaseModel):
@@ -118,6 +138,7 @@ class AuthDataHAS(BaseModel):
 
 class HASMessage(BaseModel):
     cmd: CmdType | None
+    auth_key: UUID | None
 
 
 class HASWait(HASMessage):
@@ -125,11 +146,13 @@ class HASWait(HASMessage):
     uuid: UUID | None
     account: str | None
 
-    @validator('cmd')
+    @validator("cmd")
     def cmd_must_be(cls, v):
-        if v not in [CmdType.auth_wait, CmdType.sign_wait]:
-            raise ValueError('Not a Waiting Cmd type')
+        if v not in [CmdType.auth_wait, CmdType.sign_wait, CmdType.challenge_wait]:
+            raise ValueError("Not a Waiting Cmd type")
         return v
+
+
 # class SignWaitHAS(HASMessage, HASWait):
 #     uuid: UUID
 
@@ -147,9 +170,13 @@ class AuthReqHAS(HASMessage):
 
 
 class AuthPayloadHAS(BaseModel):
+    """This is the auth-key used when creating
+    The APP must then encrypt the auth_data object
+    using an encryption key (auth_key)"""
+
     account: str
     uuid: UUID
-    key: UUID  # This is the auth-key used when creating "The APP must then encrypt the auth_data object using an encryption key (auth_key)"
+    key: UUID
     host: str = HAS_SERVER
 
     @property
@@ -204,9 +231,16 @@ class AuthNackHAS(HASMessage):
         validate_hive_auth_req(self.uuid, self.data)
 
 
-class AuthAckDataHAS(HASWait):
-    token: UUID
+class HASChallenge(HASWait):
     challenge: ChallengeHAS = None
+
+
+class AuthAckDataHAS(HASChallenge):
+    token: UUID
+
+
+class ChallAckDataHAS(HASChallenge):
+    pubkey: str
 
 
 class SignAckHAS(HASMessage):
@@ -247,6 +281,46 @@ class SignReqHAS(HASMessage):
     data: str
     auth_key: UUID
 
+    def __init__(self, acc_name: str, token: ValidToken, data: str) -> None:
+        super().__init__(
+            cmd=CmdType.sign_req,
+            account=acc_name,
+            token=token.token,
+            data=data,
+            auth_key=token.auth_key,
+        )
+
+
+class ChallengeReqHAS(HASMessage):
+    account: str
+    token: UUID
+    data: str
+    auth_key: UUID
+
+    def __init__(
+        self,
+        acc_name: str,
+        key_type: KeyType,
+        token: ValidToken,
+        challenge_message: str,
+    ) -> None:
+        challenge = ChallengeHAS(
+            key_type=key_type,
+            challenge_data={
+                "timestamp": datetime.now(tz=timezone.utc).timestamp(),
+                "app_session_id": uuid4(),
+                "message": challenge_message,
+            },
+        )
+        data = (challenge.encrypted_b64(token.auth_key)).decode("utf-8")
+        super().__init__(
+            cmd=CmdType.challenge_req,
+            account=acc_name,
+            token=token.token,
+            data=data,
+            auth_key=token.auth_key,
+        )
+
 
 class AuthObjectHAS(BaseModel):
     acc_name: str
@@ -254,12 +328,45 @@ class AuthObjectHAS(BaseModel):
     auth_req: AuthReqHAS
     timestamp: datetime = datetime.now(tz=timezone.utc)
 
+    def __init__(
+        __pydantic_self__,
+        acc_name: str,
+        key_type: KeyType,
+        challenge_message: str,
+        use_pksa_key: bool = False,
+    ) -> None:
+        """
+        Builds an `auth_req` with a challenge.
+        If token is given needs to use the previous `auth_key`
+        """
+        challenge = ChallengeHAS(
+            key_type=key_type,
+            challenge_data={
+                "timestamp": datetime.now(tz=timezone.utc).timestamp(),
+                "app_session_id": uuid4(),
+                "message": challenge_message,
+            },
+        )
+        auth_data = AuthDataHAS(
+            challenge=challenge,
+            auth_key=uuid4(),
+        )
+        auth_req = AuthReqHAS(
+            cmd=CmdType.auth_req,
+            account=acc_name,
+            data=auth_data.encrypted_b64,
+        )
+        if use_pksa_key:
+            auth_req.auth_key = js_encrypt(
+                str_bytes(auth_data.auth_key), str_bytes(HAS_AUTH_REQ_SECRET)
+            )
+        super().__init__(acc_name=acc_name, auth_data=auth_data, auth_req=auth_req)
 
-class ValidToken(HASWait):
-    acc_name: str
-    token: UUID
-    expire: datetime
-    auth_key: UUID
+
+class ChellengeReqHAS(HASMessage):
+    account: str
+    token: str
+    data: str
 
 
 class SignDataHAS(BaseModel):
@@ -282,22 +389,34 @@ class SignDataHAS(BaseModel):
         return js_encrypt(self.bytes, str_bytes(auth_key))
 
 
+def purge_a_list(any_list: List):
+    """Checks for expired itesm in any list. Returns a list with
+    expired items removed"""
+    delete_list = []
+    for i, item in enumerate(any_list):
+        if item.expire:
+            expires_in = item.expire - datetime.now(tz=timezone.utc)
+            if expires_in < timedelta(seconds=0):
+                delete_list.append(i)
+            else:
+                logging.debug(f"Expires in {expires_in} | {item}")
+    if delete_list:
+        any_list = [i for j, i in enumerate(any_list) if j not in delete_list]
+    return any_list
+
+
 class AllLists(BaseModel):
     # items: List[AuthObjectHAS | ]
     auth_list: List[AuthObjectHAS] = []
     wait_list: List[HASWait] = []
     token_list: List[ValidToken] = []
 
-    def purge_expired(self):
-        """Check for epired waiting objects and tokens"""
-        for list in [self.wait_list, self.token_list]:
-            for item in list:
-                if item.expire:
-                    expires_in = item.expire - datetime.now(tz=timezone.utc)
-                    if expires_in < timedelta(seconds=0):
-                        del item
-                    else:
-                        logging.debug(f"Expires in {expires_in} | {item}")
+    def purge_expired(self) -> Tuple[int, int]:
+        """Check for epired waiting objects and tokens
+        Returns a tuple of number of waiting items and valid tokens"""
+        self.wait_list = purge_a_list(self.wait_list)
+        self.token_list = purge_a_list(self.token_list)
+        return (len(self.wait_list), len(self.token_list))
 
     def find_auth(self, acc_name: str) -> AuthObjectHAS:
         found = [item for item in self.auth_list if item.acc_name == acc_name]
@@ -321,10 +440,16 @@ class AllLists(BaseModel):
         index = self.wait_list.index(found)
         del self.wait_list[index]
 
-    def find_token(self, acc_name: str) -> ValidToken | None:
+    def find_token_by_account(self, acc_name: str) -> ValidToken | None:
         found = [item for item in self.token_list if item.acc_name == acc_name]
         if not found:
             return None
+        if len(found) == 1:
+            return found[0]
+        raise Exception("Need to deal with multiple concurrent auth requests")
+
+    def find_token_by_uuid_str(self, token_str: str) -> ValidToken | None:
+        found = [item for item in self.token_list if str(item.token) == token_str]
         if len(found) == 1:
             return found[0]
         raise Exception("Need to deal with multiple concurrent auth requests")
@@ -338,51 +463,58 @@ def validate_hive_sign_req(uuid: UUID, data: str):
 
 
 def validate_hive_auth_req(uuid: UUID, data: str):
-    """Validates an authentication and challenge"""
+    """Validates an authentication and challenge
+    or validates a challenge on its own"""
     # Find the matching index of ACK_WAIT_LIST
     auth_wait = GLOBAL_LISTS.find_wait(uuid)
     GLOBAL_LISTS.del_wait(auth_wait)
-    # Hmmm not sure about this assumption
-    auth_object = GLOBAL_LISTS.find_auth(auth_wait.account)
-    GLOBAL_LISTS.del_auth(auth_object)
 
-    if auth_object.acc_name != auth_wait.account:
-        raise HiveVerificationFailure()
-    data_bytes = data.encode("utf-8")
-    data_string = js_decrypt(
-        data_bytes, str_bytes(auth_object.auth_data.auth_key)
-    ).decode("utf-8")
-    # If AuthNack the datastring is a UUID:
-    try:
-        check_uuid = UUID(data_string)
-        if check_uuid == uuid:
-            logging.info("Integrity Check good: Authorisation rejected")
-            return
-    except ValueError:
-        auth_ack_data = AuthAckDataHAS.parse_raw(data_string)
-    logging.info(auth_ack_data)
-    logging.info(f"Token: {auth_ack_data.token}")
-    signed_answer = SignedAnswer(
-        result=auth_ack_data.challenge.challenge,
-        request_id=1,
-        publicKey=auth_ack_data.challenge.pubkey,
-        data=SignedAnswerData(
-            _type="HAS",
-            username=auth_object.auth_req.account,
-            message=auth_object.auth_data.challenge.challenge,
-            method=auth_object.auth_data.challenge.key_type,
-            key=auth_object.auth_data.challenge.key_type,
-        ),
-    )
-    verification = validate_hivekeychain_ans(signed_answer)
-    if verification.success:
-        valid_token = ValidToken(
-            acc_name=verification.acc_name,
-            token=auth_ack_data.token,
-            expire=auth_ack_data.expire,
-            auth_key=auth_object.auth_data.auth_key,
-        )
-        GLOBAL_LISTS.token_list.append(valid_token)
+    if auth_wait.account:
+        auth_object = GLOBAL_LISTS.find_auth(auth_wait.account)
+        GLOBAL_LISTS.del_auth(auth_object)
+        if auth_object and auth_object.acc_name != auth_wait.account:
+            raise HiveVerificationFailure()
+        keys_to_use = [auth_object.auth_data.auth_key]
+    else:
+        keys_to_use = [a.auth_key for a in GLOBAL_LISTS.auth_list]
+    for auth_key in keys_to_use:
+        data_bytes = data.encode("utf-8")
+        data_string = js_decrypt(data_bytes, str_bytes(auth_key)).decode("utf-8")
+        # If AuthNack the datastring is a UUID:
+        try:
+            check_uuid = UUID(data_string)
+            if check_uuid == uuid:
+                logging.info("Integrity Check good: Authorisation rejected")
+                return
+        except ValueError:
+            decoded_data = json.loads(data_string)
+            decoded_challenge = HASChallenge.parse_raw(data_string)
+            signed_answer = SignedAnswer(
+                result=decoded_challenge.challenge.challenge,
+                request_id=1,
+                publicKey=decoded_challenge.challenge.pubkey,
+                data=SignedAnswerData(
+                    _type="HAS",
+                    username=auth_object.auth_req.account,
+                    message=auth_object.auth_data.challenge.challenge,
+                    method=auth_object.auth_data.challenge.key_type,
+                    key=auth_object.auth_data.challenge.key_type,
+                ),
+            )
+
+        if decoded_data.get("token"):
+            auth_ack_data = AuthAckDataHAS.parse_raw(data_string)
+            logging.info(auth_ack_data)
+            logging.info(f"Token: {auth_ack_data.token}")
+            verification = validate_hivekeychain_ans(signed_answer)
+            if verification.success:
+                valid_token = ValidToken(
+                    acc_name=verification.acc_name,
+                    token=auth_ack_data.token,
+                    expire=auth_ack_data.expire,
+                    auth_key=auth_object.auth_data.auth_key,
+                )
+                GLOBAL_LISTS.token_list.append(valid_token)
 
 
 async def build_auth_req_challenge(
@@ -438,7 +570,7 @@ async def socket_listen(has_socket):
                     logging.info(processed)
                 case CmdType.auth_wait:
                     auth_wait = HASWait.parse_raw(msg)
-                    # Display QR Code
+                    # Display QR Code - move this code to HASWait class
                     auth_payload = AuthPayloadHAS(
                         account=auth_wait.account,
                         uuid=auth_wait.uuid,
@@ -460,10 +592,20 @@ async def socket_listen(has_socket):
                         f"****** Alert User to authorise transaction {sign_wait.uuid}"
                     )
                     GLOBAL_LISTS.wait_list.append(sign_wait)
+                case CmdType.challenge_wait:
+                    challenge_wait = HASWait.parse_raw(msg)
+                    logging.info(
+                        f"****** Alert User to authorise challenge   {challenge_wait.uuid}"
+                    )
+                    GLOBAL_LISTS.wait_list.append(challenge_wait)
                 case CmdType.auth_ack:
                     auth_ack = AuthAckHAS.parse_raw(msg)
                     logging.debug(auth_ack)
                     auth_ack.validate_hive()
+                case CmdType.challenge_ack:
+                    challenge_ack = AuthAckHAS.parse_raw(msg)
+                    logging.debug(challenge_ack)
+                    challenge_ack.validate_hive()
                 case CmdType.auth_nack:
                     auth_nack = AuthNackHAS.parse_raw(msg)
                     logging.debug(auth_nack)
@@ -485,6 +627,8 @@ async def socket_listen(has_socket):
                 break
 
         except (ValidationError, KeyError) as ex:
+            if msg:
+                logging.error(f"Message received: {msg}")
             logging.error(ex)
             pass
         except (
@@ -521,11 +665,22 @@ async def execute_tasks(has_socket):
             raise
 
 
-async def global_list_purge():
-    """Check the global list for expired waits"""
+async def global_list_purge(
+    quit_after_waiting: bool = False, other_tasks: asyncio.Task = None
+):
+    """
+    Check the global list for expired waits.
+    If quit_after_waiting is set and no more waiting items,
+    this will quit
+    """
     while True:
-        GLOBAL_LISTS.purge_expired()
-        await asyncio.sleep(10)
+        await asyncio.sleep(1)
+        waiting, tokens = GLOBAL_LISTS.purge_expired()
+        if quit_after_waiting and waiting == 0:
+            if other_tasks:
+                other_tasks.cancel()
+            raise asyncio.CancelledError
+        await asyncio.sleep(9)
 
 
 async def manage_websocket():
@@ -547,11 +702,21 @@ async def manage_websocket():
                 break
 
 
-async def main_loop():
+async def main_listen_send_loop():
+    """Run the main parts for listening to and sending from websockets"""
+    async with asyncio.TaskGroup() as tg:
+        send_listen = tg.create_task(manage_websocket(), name="send_listen")
+        tg.create_task(
+            global_list_purge(quit_after_waiting=True, other_tasks=send_listen)
+        )
+
+
+async def main_testing_loop():
     async with asyncio.TaskGroup() as tg:
         tg.create_task(manage_websocket())
         tg.create_task(test_send_auth_req())
-        tg.create_task(test_send_transaction())
+        tg.create_task(test_challenge())
+        # tg.create_task(test_send_transaction())
         tg.create_task(global_list_purge())
 
 
@@ -565,7 +730,7 @@ async def test_send_auth_req():
         use_pksa_key = False
         if acc == "v4vapp.dev":
             use_pksa_key = True
-        auth_object = await build_auth_req_challenge(
+        auth_object = AuthObjectHAS(
             acc_name=acc,
             key_type=KeyType.posting,
             challenge_message=f"{acc} Welcome to the Party!",
@@ -581,7 +746,7 @@ async def test_send_transaction():
     # find valid Token
     for i in range(100):
         await asyncio.sleep(5)
-        valid_token = GLOBAL_LISTS.find_token(test_account)
+        valid_token = GLOBAL_LISTS.find_token_by_account(test_account)
         if valid_token:
             payload = {"HAS": f"{i} - testing", "timestamp": str(datetime.now())}
             payload_json = json.dumps(payload, separators=(",", ":"), default=str)
@@ -612,6 +777,24 @@ async def test_send_transaction():
             await asyncio.sleep(60 + i * 10)
 
 
+async def test_challenge():
+
+    await asyncio.sleep(15)
+    while True:
+        valid_token = GLOBAL_LISTS.find_token_by_account(target)
+        if valid_token:
+            challenge_req = ChallengeReqHAS(
+                acc_name=target,
+                key_type=KeyType.posting,
+                token=valid_token,
+                challenge_message="who let the dogs out?",
+            )
+            GLOBAL_LISTS.auth_list.append(challenge_req)
+            await TASK_QUEUE.put(challenge_req)
+            break
+        await asyncio.sleep(5)
+
+
 GLOBAL_LISTS: AllLists = AllLists()
 TASK_QUEUE = asyncio.Queue()
 # AUTH_LIST: AuthList = AuthList()
@@ -619,4 +802,4 @@ TASK_QUEUE = asyncio.Queue()
 # VALID_TOKEN_LIST: List[ValidToken] = []
 
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    asyncio.run(main_testing_loop())

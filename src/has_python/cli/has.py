@@ -1,23 +1,28 @@
 import asyncio
-import json
 import logging
-import os
 import sys
-from datetime import datetime, timezone
 
 import typer
-from pydantic import AnyUrl
 from websockets import connect as ws_connect
 
-from has_python.has_errors import HASFailure
-from has_python.has_lib import HAS_SERVER, HASAuthentication, KeyType
+from has_python.has_lib2 import (
+    GLOBAL_LISTS,
+    TASK_QUEUE,
+    KeyType,
+    AuthObjectHAS,
+    main_listen_send_loop,
+)
 
 app = typer.Typer()
 
-logging.getLogger("graphenerpc").setLevel(logging.WARNING)
+logging.getLogger("beemapi.graphenerpc").setLevel(logging.ERROR)
+logging.getLogger("beemapi.node").setLevel(logging.ERROR)
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
+    encoding="utf-8",
+    stream=sys.stderr,
 )
 
 
@@ -25,43 +30,28 @@ async def connect_and_challenge(
     acc_name: str,
     key_type: KeyType = KeyType.posting,
     token: str = None,
-    has_server: AnyUrl = HAS_SERVER,
     display: bool = True,
     challenge_message: str = "Any string message goes here",
 ):
     """
     Creats a HAS Authentiction connection and (option `display`) shows a QR code.
-
     """
-    has = HASAuthentication(
-        hive_acc=acc_name,
-        uri=has_server,
-        challenge_message=challenge_message,
+
+    use_pksa_key = False
+    if acc_name == "v4vapp.dev":
+        use_pksa_key = True
+    auth_object = AuthObjectHAS(
+        acc_name=acc_name,
         key_type=key_type,
-        token=token,
+        challenge_message=challenge_message,
+        use_pksa_key=use_pksa_key,
     )
-    try:
-        async with ws_connect(has.uri) as websocket:
-            has.websocket = websocket
-            time_to_wait = await has.connect_with_challenge()
-            img = await has.get_qrcode()
-            if display:
-                img.show()
-            logging.info(f"PKSA needs to show: {has.auth_wait.uuid}")
-            logging.info(f"QR-Code as text {'*'*40} \n\n{has.qr_text}\n\n{'*'*40}")
-            await has.waiting_for_challenge_response(time_to_wait)
+    GLOBAL_LISTS.auth_list.append(auth_object)
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(main_listen_send_loop())
+        tg.create_task(TASK_QUEUE.put(auth_object.auth_req))
 
-            token_life = has.auth_ack_data.expire - datetime.now(tz=timezone.utc)
-            logging.info(
-                f"✅ Token: {has.auth_ack_data.token} | Expires in : {token_life}"
-            )
-            logging.info(f"Session ID: {has.app_session_id}")
-
-    except HASFailure as ex:
-        logging.info(f"{ex.message}")
-        sys.exit(os.EX_UNAVAILABLE)
-
-    return
+    print(GLOBAL_LISTS.token_list[0])
 
 
 @app.command()

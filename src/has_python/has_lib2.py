@@ -145,11 +145,21 @@ class AuthDataHAS(BaseModel):
         return js_encrypt(self.bytes, str_bytes(self.auth_key))
 
 
-class AuthReqHAS(HASMessage):
+class _AuthReqHAS(HASMessage):
     account: str
     data: str
     token: UUID | None
     encrypted_auth_key: str | None
+
+
+class AuthReqHAS(HASMessage):
+    account: str
+    data: str
+    token: UUID | None
+    auth_key: str | None
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class HASWait(HASMessage):
@@ -278,10 +288,10 @@ class SignReqHAS(HASMessage):
     data: str
     auth_key: UUID
 
-    def __init__(self, acc_name: str, token: ValidToken, data: str) -> None:
+    def __init__(self, account: str, token: ValidToken, data: str) -> None:
         super().__init__(
             cmd=CmdType.sign_req,
-            account=acc_name,
+            account=account,
             token=token.token,
             data=data,
             auth_key=token.auth_key,
@@ -296,7 +306,7 @@ class ChallengeReqHAS(HASMessage):
 
     def __init__(
         self,
-        acc_name: str,
+        account: str,
         key_type: KeyType,
         token: ValidToken,
         challenge_message: str,
@@ -312,14 +322,14 @@ class ChallengeReqHAS(HASMessage):
         data = (challenge.encrypted_b64(token.auth_key)).decode("utf-8")
         super().__init__(
             cmd=CmdType.challenge_req,
-            account=acc_name,
+            account=account,
             token=token.token,
             data=data,
             auth_key=token.auth_key,
         )
 
 
-class AuthObject(AuthDataHAS, AuthReqHAS):
+class AuthSignObject(AuthDataHAS, _AuthReqHAS):
     timestamp: datetime = datetime.now(tz=timezone.utc)
 
     def __init__(
@@ -328,11 +338,15 @@ class AuthObject(AuthDataHAS, AuthReqHAS):
         key_type: KeyType,
         challenge_message: str,
         use_pksa_key: bool = False,
+        auth_key: UUID = uuid4(),
+        token: ValidToken = None,
     ) -> None:
         """
         Builds an `auth_req` with a challenge.
         If token is given needs to use the previous `auth_key`
         """
+        if token:
+            auth_key = token.token
         timestamp = datetime.now(tz=timezone.utc).timestamp()
         challenge = ChallengeHAS(
             key_type=key_type,
@@ -344,33 +358,35 @@ class AuthObject(AuthDataHAS, AuthReqHAS):
         )
         auth_data = AuthDataHAS(
             challenge=challenge,
-            auth_key=uuid4(),
+            auth_key=auth_key,
         )
-        auth_req = AuthReqHAS(
+        auth_req = _AuthReqHAS(
             cmd=CmdType.auth_req,
             account=acc_name,
             data=auth_data.encrypted_b64,
         )
+        all_data = auth_data.dict(exclude_unset=True) | auth_req.dict(
+            exclude_unset=True
+        )
         if use_pksa_key:
-            auth_req.encrypted_auth_key = js_encrypt(
+            encrypted_auth_key = js_encrypt(
                 str_bytes(auth_data.auth_key), str_bytes(HAS_AUTH_REQ_SECRET)
             )
-        all_data = auth_data.dict(exclude_unset=True) | auth_req.dict(exclude_unset=True)
+            all_data = all_data | {"encrypted_auth_key": encrypted_auth_key}
         super().__init__(**all_data)
 
     @property
-    def auth_req(self):
+    def auth_req(self) -> AuthReqHAS:
         """Returns only an auth_req"""
-        auth_req = AuthReqHAS.parse_obj(self)
+        auth_req = AuthReqHAS(
+            cmd=CmdType.auth_req,
+            auth_key=self.encrypted_auth_key,
+            account=self.account,
+            data=self.data,
+            token=self.token,
+        )
         # Have to transform `encrypted_auth_key` to `auth_key`
-        auth_req.auth_key = auth_req.encrypted_auth_key
         return auth_req
-
-
-class ChellengeReqHAS(HASMessage):
-    account: str
-    token: str
-    data: str
 
 
 class SignDataHAS(BaseModel):
@@ -411,7 +427,7 @@ def purge_a_list(any_list: List):
 
 class AllLists(BaseModel):
     # items: List[AuthObjectHAS | ]
-    auth_list: List[AuthObject] = []
+    auth_list: List[AuthSignObject] = []
     wait_list: List[HASWait] = []
     token_list: List[ValidToken] = []
 
@@ -422,13 +438,13 @@ class AllLists(BaseModel):
         self.token_list = purge_a_list(self.token_list)
         return (len(self.wait_list), len(self.token_list))
 
-    def find_auth(self, acc_name: str) -> AuthObject:
+    def find_auth(self, acc_name: str) -> AuthSignObject:
         found = [item for item in self.auth_list if item.account == acc_name]
         if len(found) == 1:
             return found[0]
         raise Exception("Need to deal with multiple concurrent auth requests")
 
-    def del_auth(self, found: AuthObject):
+    def del_auth(self, found: AuthSignObject):
         """Finda auth item and deletes it"""
         index = self.auth_list.index(found)
         del self.auth_list[index]
@@ -485,7 +501,9 @@ def validate_hive_auth_req(uuid: UUID, data: str):
         auth_object = GLOBAL_LISTS.auth_list[0]
     for auth_key in keys_to_use:
         data_bytes = data.encode("utf-8")
-        data_string = js_decrypt(data_bytes, str_bytes(auth_key)).decode("utf-8")
+        data_string = js_decrypt(data_bytes, str_bytes(auth_key)).decode(
+            encoding="utf-8", errors="ignore"
+        )
         # If AuthNack the datastring is a UUID:
         try:
             check_uuid = UUID(data_string)
@@ -506,7 +524,7 @@ def validate_hive_auth_req(uuid: UUID, data: str):
                 publicKey=decoded_challenge.pubkey,
                 data=SignedAnswerData(
                     _type="HAS",
-                    username=auth_object.auth_req.account,
+                    username=auth_object.account,
                     message=auth_object.challenge.challenge,
                     method=auth_object.challenge.key_type,
                     key=auth_object.challenge.key_type,
@@ -515,7 +533,6 @@ def validate_hive_auth_req(uuid: UUID, data: str):
 
         if decoded_data.get("token"):
             auth_ack_data = AuthAckDataHAS.parse_raw(data_string)
-            logging.info(auth_ack_data)
             logging.info(f"Token: {auth_ack_data.token}")
             verification = validate_hivekeychain_ans(signed_answer)
             if verification.success:
@@ -534,7 +551,7 @@ async def build_auth_req_challenge(
     challenge_message: str,
     token: UUID = None,
     use_pksa_key: bool = False,
-) -> AuthObject:
+) -> AuthSignObject:
     """
     Builds an `auth_req` with a challenge
     """
@@ -551,7 +568,7 @@ async def build_auth_req_challenge(
         challenge=challenge,
         auth_key=uuid4(),  # UUID("37c3b377-cf91-44a3-9e21-6af5b8773bf3"), # hard coded
     )
-    auth_req = AuthReqHAS(
+    auth_req = _AuthReqHAS(
         cmd=CmdType.auth_req,
         account=acc_name,
         data=auth_data.encrypted_b64,
@@ -561,7 +578,7 @@ async def build_auth_req_challenge(
             str_bytes(auth_data.auth_key), str_bytes(HAS_AUTH_REQ_SECRET)
         )
 
-    return AuthObject(acc_name=acc_name, auth_data=auth_data, auth_req=auth_req)
+    return AuthSignObject(acc_name=acc_name, auth_data=auth_data, auth_req=auth_req)
 
 
 async def socket_listen(has_socket):
@@ -585,9 +602,7 @@ async def socket_listen(has_socket):
                     auth_payload = AuthPayloadHAS(
                         account=auth_wait.account,
                         uuid=auth_wait.uuid,
-                        key=GLOBAL_LISTS.find_auth(
-                            auth_wait.account
-                        ).auth_key,
+                        key=GLOBAL_LISTS.find_auth(auth_wait.account).auth_key,
                     )
                     extra_text = str(
                         f"Check: {auth_wait.uuid} - " f"{auth_wait.account}"
@@ -661,6 +676,7 @@ async def execute_tasks(has_socket):
     while True:
         try:
             msg: HASMessage = await TASK_QUEUE.get()
+            logging.info(msg.json(exclude_none=True, models_as_dict=True))
             await has_socket.send(msg.json(exclude_none=True))
             logging.info(f"------> Sent:   {msg.cmd}")
             await asyncio.sleep(0.1)
@@ -749,13 +765,14 @@ async def test_send_auth_req():
         use_pksa_key = False
         if acc == "v4vapp.dev":
             use_pksa_key = True
-        auth_object = AuthObject(
+        auth_object = AuthSignObject(
             acc_name=acc,
             key_type=KeyType.posting,
             challenge_message=f"{acc} Welcome to the Party!",
             use_pksa_key=use_pksa_key,
         )
         GLOBAL_LISTS.auth_list.append(auth_object)
+        temp = auth_object.auth_req
         await TASK_QUEUE.put(auth_object.auth_req)
 
 
@@ -784,10 +801,8 @@ async def test_send_transaction():
                 broadcast=True,
             )
             sign_req = SignReqHAS(
-                cmd=CmdType.sign_req,
                 account=valid_token.acc_name,
-                token=valid_token.token,
-                auth_key=valid_token.auth_key,
+                token=valid_token,
                 data=sign_data.encrypted_b64(valid_token.auth_key),
             )
             logging.info(sign_req)
@@ -801,14 +816,22 @@ async def test_challenge():
     await asyncio.sleep(15)
     while True:
         valid_token = GLOBAL_LISTS.find_token_by_account(target)
+        challenge_message = "who let the dogs out?"
+        key_type = KeyType.posting
         if valid_token:
-            challenge_req = ChallengeReqHAS(
+            auth_sign = AuthSignObject(
                 acc_name=target,
-                key_type=KeyType.posting,
+                key_type=key_type,
+                challenge_message=challenge_message,
                 token=valid_token,
-                challenge_message="who let the dogs out?",
             )
-            GLOBAL_LISTS.auth_list.append(challenge_req)
+            challenge_req = ChallengeReqHAS(
+                account=target,
+                key_type=key_type,
+                token=valid_token,
+                challenge_message=challenge_message,
+            )
+            GLOBAL_LISTS.auth_list.append(auth_sign)
             await TASK_QUEUE.put(challenge_req)
             break
         await asyncio.sleep(5)

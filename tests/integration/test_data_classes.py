@@ -4,7 +4,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from has_python.has_lib2 import AuthObject, CmdType, HASApp, HASMessage, HASWait
+from has_python.has_lib2 import AuthSignObject, CmdType, HASApp, HASMessage, HASWait
 
 
 @pytest.mark.asyncio
@@ -12,7 +12,7 @@ async def test_auth_object_has():
     # Tests ChallengeHAS
     # Tests AuthDataHAS
     # Tests AuthReqHAS
-    auth_req = AuthObject(
+    auth_req = AuthSignObject(
         acc_name="v4vapp.dev",
         key_type="posting",
         challenge_message="pytest testing",

@@ -34,6 +34,24 @@
             }
         },
         {
+            "name": "has - CLI brianoflondon",
+            "type": "python",
+            "request": "launch",
+            "program": "src/has_python/cli/has.py",
+            "args": [
+                "brianoflondon",
+                "--key-type",
+                "posting",
+                // "--token",
+                // "bbcb5b87-fcc7-46c1-a760-b4bed22848f9"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYDEVD_DISABLE_FILE_VALIDATION": "1"
+            }
+        },
+        {
             "name": "HAS Demo",
             "type": "python",
             "request": "launch",

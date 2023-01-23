@@ -8,7 +8,7 @@ from websockets import connect as ws_connect
 from has_python.has_lib2 import (
     GLOBAL_LISTS,
     TASK_QUEUE,
-    AuthObject,
+    AuthSignObject,
     KeyType,
     main_listen_send_loop,
 )
@@ -33,7 +33,7 @@ async def connect_and_challenge(
     use_pksa_key = False
     if acc_name == "v4vapp.dev":
         use_pksa_key = True
-    auth_object = AuthObject(
+    auth_object = AuthSignObject(
         acc_name=acc_name,
         key_type=key_type,
         challenge_message=challenge_message,

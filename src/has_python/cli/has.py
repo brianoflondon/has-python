@@ -18,13 +18,6 @@ app = typer.Typer()
 logging.getLogger("beemapi.graphenerpc").setLevel(logging.ERROR)
 logging.getLogger("beemapi.node").setLevel(logging.ERROR)
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
-    encoding="utf-8",
-    stream=sys.stderr,
-)
-
 
 async def connect_and_challenge(
     acc_name: str,
@@ -66,6 +59,13 @@ def connect(
     """Start a new connection to
     Hive Authentication Services (HAS)
     from the Hive Account ACC_Name"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
+        encoding="utf-8",
+        stream=sys.stderr,
+    )
+
     try:
         asyncio.run(
             # test_transaction_request(),
@@ -73,7 +73,11 @@ def connect(
                 acc_name=hive_account, key_type=key_type, token=token, display=display
             )
         )
-        print("all done")
+        if GLOBAL_LISTS.find_token_by_account(hive_account):
+            print("Authorisation Granted ✅")
+        else:
+            print("Authorisation denied: ❌")
+        print("All Done")
     except KeyboardInterrupt:
         logging.info("Ctrl-C pressed, bye bye!")
     except Exception as ex:

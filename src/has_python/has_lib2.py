@@ -149,7 +149,7 @@ class AuthReqHAS(HASMessage):
     account: str
     data: str
     token: UUID | None
-    auth_key: str | None
+    encrypted_auth_key: str | None
 
 
 class HASWait(HASMessage):
@@ -319,10 +319,7 @@ class ChallengeReqHAS(HASMessage):
         )
 
 
-class AuthObject(BaseModel):
-    acc_name: str
-    auth_data: AuthDataHAS
-    auth_req: AuthReqHAS
+class AuthObject(AuthDataHAS, AuthReqHAS):
     timestamp: datetime = datetime.now(tz=timezone.utc)
 
     def __init__(
@@ -336,10 +333,11 @@ class AuthObject(BaseModel):
         Builds an `auth_req` with a challenge.
         If token is given needs to use the previous `auth_key`
         """
+        timestamp = datetime.now(tz=timezone.utc).timestamp()
         challenge = ChallengeHAS(
             key_type=key_type,
             challenge_data={
-                "timestamp": datetime.now(tz=timezone.utc).timestamp(),
+                "timestamp": timestamp,
                 "app_session_id": uuid4(),
                 "message": challenge_message,
             },
@@ -354,10 +352,19 @@ class AuthObject(BaseModel):
             data=auth_data.encrypted_b64,
         )
         if use_pksa_key:
-            auth_req.auth_key = js_encrypt(
+            auth_req.encrypted_auth_key = js_encrypt(
                 str_bytes(auth_data.auth_key), str_bytes(HAS_AUTH_REQ_SECRET)
             )
-        super().__init__(acc_name=acc_name, auth_data=auth_data, auth_req=auth_req)
+        all_data = auth_data.dict(exclude_unset=True) | auth_req.dict(exclude_unset=True)
+        super().__init__(**all_data)
+
+    @property
+    def auth_req(self):
+        """Returns only an auth_req"""
+        auth_req = AuthReqHAS.parse_obj(self)
+        # Have to transform `encrypted_auth_key` to `auth_key`
+        auth_req.auth_key = auth_req.encrypted_auth_key
+        return auth_req
 
 
 class ChellengeReqHAS(HASMessage):
@@ -416,7 +423,7 @@ class AllLists(BaseModel):
         return (len(self.wait_list), len(self.token_list))
 
     def find_auth(self, acc_name: str) -> AuthObject:
-        found = [item for item in self.auth_list if item.acc_name == acc_name]
+        found = [item for item in self.auth_list if item.account == acc_name]
         if len(found) == 1:
             return found[0]
         raise Exception("Need to deal with multiple concurrent auth requests")
@@ -469,9 +476,9 @@ def validate_hive_auth_req(uuid: UUID, data: str):
     if auth_wait.account:
         auth_object = GLOBAL_LISTS.find_auth(auth_wait.account)
         GLOBAL_LISTS.del_auth(auth_object)
-        if auth_object and auth_object.acc_name != auth_wait.account:
+        if auth_object and auth_object.account != auth_wait.account:
             raise HiveVerificationFailure()
-        keys_to_use = [auth_object.auth_data.auth_key]
+        keys_to_use = [auth_object.auth_key]
     else:
         keys_to_use = [a.auth_key for a in GLOBAL_LISTS.auth_list]
         # BAD HACK NEED TO FIX
@@ -500,9 +507,9 @@ def validate_hive_auth_req(uuid: UUID, data: str):
                 data=SignedAnswerData(
                     _type="HAS",
                     username=auth_object.auth_req.account,
-                    message=auth_object.auth_data.challenge.challenge,
-                    method=auth_object.auth_data.challenge.key_type,
-                    key=auth_object.auth_data.challenge.key_type,
+                    message=auth_object.challenge.challenge,
+                    method=auth_object.challenge.key_type,
+                    key=auth_object.challenge.key_type,
                 ),
             )
 
@@ -516,7 +523,7 @@ def validate_hive_auth_req(uuid: UUID, data: str):
                     acc_name=verification.acc_name,
                     token=auth_ack_data.token,
                     expire=auth_ack_data.expire,
-                    auth_key=auth_object.auth_data.auth_key,
+                    auth_key=auth_object.auth_key,
                 )
                 GLOBAL_LISTS.token_list.append(valid_token)
 
@@ -580,7 +587,7 @@ async def socket_listen(has_socket):
                         uuid=auth_wait.uuid,
                         key=GLOBAL_LISTS.find_auth(
                             auth_wait.account
-                        ).auth_data.auth_key,
+                        ).auth_key,
                     )
                     extra_text = str(
                         f"Check: {auth_wait.uuid} - " f"{auth_wait.account}"

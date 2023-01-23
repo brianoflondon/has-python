@@ -79,12 +79,27 @@ class KeyType(str, Enum):
     memo = "memo"
 
 
+class HASMessage(BaseModel):
+    """Base for all messages which flow between HAS and app"""
+
+    cmd: CmdType | None
+    auth_key: UUID | None
+
+
 class ValidToken(BaseModel):
+    """Holds a valid token as returned following an authentication"""
+
     expire: datetime
     acc_name: str
     token: UUID
     expire: datetime
     auth_key: UUID
+
+
+class HASApp(BaseModel):
+    name: str = HAS_APP_DATA["name"]
+    description: str = HAS_APP_DATA["description"]
+    icon: str = HAS_APP_DATA["icon"]
 
 
 class ChallengeHAS(BaseModel):
@@ -113,12 +128,6 @@ class ChallengeHAS(BaseModel):
         return js_encrypt(self.bytes, str_bytes(auth_key))
 
 
-class HASApp(BaseModel):
-    name: str = HAS_APP_DATA["name"]
-    description: str = HAS_APP_DATA["description"]
-    icon: str = HAS_APP_DATA["icon"]
-
-
 class AuthDataHAS(BaseModel):
     app: HASApp = HASApp()
     token: UUID | None
@@ -136,12 +145,16 @@ class AuthDataHAS(BaseModel):
         return js_encrypt(self.bytes, str_bytes(self.auth_key))
 
 
-class HASMessage(BaseModel):
-    cmd: CmdType | None
-    auth_key: UUID | None
+class AuthReqHAS(HASMessage):
+    account: str
+    data: str
+    token: UUID | None
+    auth_key: str | None
 
 
 class HASWait(HASMessage):
+    """Wait replies sent by HAS server"""
+
     expire: datetime
     uuid: UUID | None
     account: str | None
@@ -151,22 +164,6 @@ class HASWait(HASMessage):
         if v not in [CmdType.auth_wait, CmdType.sign_wait, CmdType.challenge_wait]:
             raise ValueError("Not a Waiting Cmd type")
         return v
-
-
-# class SignWaitHAS(HASMessage, HASWait):
-#     uuid: UUID
-
-
-# class AuthWaitHAS(HASWait):
-#     uuid: UUID
-#     account: str
-
-
-class AuthReqHAS(HASMessage):
-    account: str
-    data: str
-    token: UUID | None
-    auth_key: str | None
 
 
 class AuthPayloadHAS(BaseModel):
@@ -322,7 +319,7 @@ class ChallengeReqHAS(HASMessage):
         )
 
 
-class AuthObjectHAS(BaseModel):
+class AuthObject(BaseModel):
     acc_name: str
     auth_data: AuthDataHAS
     auth_req: AuthReqHAS
@@ -407,7 +404,7 @@ def purge_a_list(any_list: List):
 
 class AllLists(BaseModel):
     # items: List[AuthObjectHAS | ]
-    auth_list: List[AuthObjectHAS] = []
+    auth_list: List[AuthObject] = []
     wait_list: List[HASWait] = []
     token_list: List[ValidToken] = []
 
@@ -418,13 +415,13 @@ class AllLists(BaseModel):
         self.token_list = purge_a_list(self.token_list)
         return (len(self.wait_list), len(self.token_list))
 
-    def find_auth(self, acc_name: str) -> AuthObjectHAS:
+    def find_auth(self, acc_name: str) -> AuthObject:
         found = [item for item in self.auth_list if item.acc_name == acc_name]
         if len(found) == 1:
             return found[0]
         raise Exception("Need to deal with multiple concurrent auth requests")
 
-    def del_auth(self, found: AuthObjectHAS):
+    def del_auth(self, found: AuthObject):
         """Finda auth item and deletes it"""
         index = self.auth_list.index(found)
         del self.auth_list[index]
@@ -477,6 +474,8 @@ def validate_hive_auth_req(uuid: UUID, data: str):
         keys_to_use = [auth_object.auth_data.auth_key]
     else:
         keys_to_use = [a.auth_key for a in GLOBAL_LISTS.auth_list]
+        # BAD HACK NEED TO FIX
+        auth_object = GLOBAL_LISTS.auth_list[0]
     for auth_key in keys_to_use:
         data_bytes = data.encode("utf-8")
         data_string = js_decrypt(data_bytes, str_bytes(auth_key)).decode("utf-8")
@@ -488,11 +487,16 @@ def validate_hive_auth_req(uuid: UUID, data: str):
                 return
         except ValueError:
             decoded_data = json.loads(data_string)
-            decoded_challenge = HASChallenge.parse_raw(data_string)
+            if decoded_data.get("token"):
+                decoded_challenge = ChallengeHAS.parse_obj(
+                    decoded_data.get("challenge")
+                )
+            else:
+                decoded_challenge = ChallengeHAS.parse_obj(decoded_data)
             signed_answer = SignedAnswer(
-                result=decoded_challenge.challenge.challenge,
+                result=decoded_challenge.challenge,
                 request_id=1,
-                publicKey=decoded_challenge.challenge.pubkey,
+                publicKey=decoded_challenge.pubkey,
                 data=SignedAnswerData(
                     _type="HAS",
                     username=auth_object.auth_req.account,
@@ -523,7 +527,7 @@ async def build_auth_req_challenge(
     challenge_message: str,
     token: UUID = None,
     use_pksa_key: bool = False,
-) -> AuthObjectHAS:
+) -> AuthObject:
     """
     Builds an `auth_req` with a challenge
     """
@@ -550,7 +554,7 @@ async def build_auth_req_challenge(
             str_bytes(auth_data.auth_key), str_bytes(HAS_AUTH_REQ_SECRET)
         )
 
-    return AuthObjectHAS(acc_name=acc_name, auth_data=auth_data, auth_req=auth_req)
+    return AuthObject(acc_name=acc_name, auth_data=auth_data, auth_req=auth_req)
 
 
 async def socket_listen(has_socket):
@@ -589,13 +593,15 @@ async def socket_listen(has_socket):
                 case CmdType.sign_wait:
                     sign_wait = HASWait.parse_raw(msg)
                     logging.info(
-                        f"****** Alert User to authorise transaction {sign_wait.uuid}"
+                        f"****** Alert User to authorise transaction "
+                        f"{sign_wait.uuid}"
                     )
                     GLOBAL_LISTS.wait_list.append(sign_wait)
                 case CmdType.challenge_wait:
                     challenge_wait = HASWait.parse_raw(msg)
                     logging.info(
-                        f"****** Alert User to authorise challenge   {challenge_wait.uuid}"
+                        f"****** Alert User to authorise challenge   "
+                        f"{challenge_wait.uuid}"
                     )
                     GLOBAL_LISTS.wait_list.append(challenge_wait)
                 case CmdType.auth_ack:
@@ -667,18 +673,20 @@ async def execute_tasks(has_socket):
 
 async def global_list_purge(
     quit_after_waiting: bool = False, other_tasks: asyncio.Task = None
-):
+) -> bool:
     """
     Check the global list for expired waits.
     If quit_after_waiting is set and no more waiting items,
-    this will quit
+    this will quit and return True
     """
+    await asyncio.sleep(10)
     while True:
         await asyncio.sleep(1)
         waiting, tokens = GLOBAL_LISTS.purge_expired()
         if quit_after_waiting and waiting == 0:
             if other_tasks:
                 other_tasks.cancel()
+            return True
             raise asyncio.CancelledError
         await asyncio.sleep(9)
 
@@ -690,6 +698,8 @@ async def manage_websocket():
                 async with asyncio.TaskGroup() as tg:
                     listen = tg.create_task(socket_listen(has_socket))
                     execute = tg.create_task(execute_tasks(has_socket))
+                    logging.info(f"Finished Listening {listen}")
+                    logging.info(f"Finished Exectuing {execute}")
             except (
                 websockets.exceptions.ConnectionClosedError,
                 ConnectionError,
@@ -706,9 +716,11 @@ async def main_listen_send_loop():
     """Run the main parts for listening to and sending from websockets"""
     async with asyncio.TaskGroup() as tg:
         send_listen = tg.create_task(manage_websocket(), name="send_listen")
-        tg.create_task(
+        time_to_end = tg.create_task(
             global_list_purge(quit_after_waiting=True, other_tasks=send_listen)
         )
+    if time_to_end.done():
+        send_listen.cancel()
 
 
 async def main_testing_loop():
@@ -730,7 +742,7 @@ async def test_send_auth_req():
         use_pksa_key = False
         if acc == "v4vapp.dev":
             use_pksa_key = True
-        auth_object = AuthObjectHAS(
+        auth_object = AuthObject(
             acc_name=acc,
             key_type=KeyType.posting,
             challenge_message=f"{acc} Welcome to the Party!",

@@ -8,8 +8,8 @@ from websockets import connect as ws_connect
 from has_python.has_lib2 import (
     GLOBAL_LISTS,
     TASK_QUEUE,
+    AuthObject,
     KeyType,
-    AuthObjectHAS,
     main_listen_send_loop,
 )
 
@@ -40,7 +40,7 @@ async def connect_and_challenge(
     use_pksa_key = False
     if acc_name == "v4vapp.dev":
         use_pksa_key = True
-    auth_object = AuthObjectHAS(
+    auth_object = AuthObject(
         acc_name=acc_name,
         key_type=key_type,
         challenge_message=challenge_message,
@@ -51,7 +51,7 @@ async def connect_and_challenge(
         tg.create_task(main_listen_send_loop())
         tg.create_task(TASK_QUEUE.put(auth_object.auth_req))
 
-    print(GLOBAL_LISTS.token_list[0])
+    # print(GLOBAL_LISTS.token_list[0])
 
 
 @app.command()
@@ -81,32 +81,32 @@ def connect(
         logging.info("Quits")
 
 
-async def test_transaction_request():
-    test_account = "brianoflondon"
-    has = HASAuthentication(hive_acc=test_account)
-    async with ws_connect(has.uri) as websocket:
-        has.websocket = websocket
-        time_to_wait = await has.connect_with_challenge()
-        img = await has.get_qrcode()
-        img.show()
-        await has.waiting_for_challenge_response(time_to_wait)
-        assert has.token
-        assert has.expire
-        payload = {"HAS": "testing"}
-        logging.info(has.token)
-        test_ops = [
-            [
-                "custom_json",
-                {
-                    "id": "v4vapp_has_testing",
-                    "json": payload,
-                    "required_auths": [],
-                    "required_posting_auths": [test_account],
-                },
-            ]
-        ]
-        time_to_wait = await has.transaction_request(ops=test_ops)
-        await has.waiting_for_challenge_response(time_to_wait=time_to_wait)
+# async def test_transaction_request():
+#     test_account = "brianoflondon"
+#     has = HASAuthentication(hive_acc=test_account)
+#     async with ws_connect(has.uri) as websocket:
+#         has.websocket = websocket
+#         time_to_wait = await has.connect_with_challenge()
+#         img = await has.get_qrcode()
+#         img.show()
+#         await has.waiting_for_challenge_response(time_to_wait)
+#         assert has.token
+#         assert has.expire
+#         payload = {"HAS": "testing"}
+#         logging.info(has.token)
+#         test_ops = [
+#             [
+#                 "custom_json",
+#                 {
+#                     "id": "v4vapp_has_testing",
+#                     "json": payload,
+#                     "required_auths": [],
+#                     "required_posting_auths": [test_account],
+#                 },
+#             ]
+#         ]
+#         time_to_wait = await has.transaction_request(ops=test_ops)
+#         await has.waiting_for_challenge_response(time_to_wait=time_to_wait)
 
 
 if __name__ == "__main__":

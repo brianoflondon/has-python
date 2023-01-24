@@ -6,7 +6,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, List, Tuple
+from typing import Any, Awaitable, List, Tuple
 from uuid import UUID, uuid4
 
 import requests
@@ -22,6 +22,7 @@ from has_python.hive_validation import (
     Operation,
     SignedAnswer,
     SignedAnswerData,
+    SignedAnswerVerification,
     validate_hivekeychain_ans,
 )
 from has_python.jscrypt_encode_for_python import js_decrypt, js_encrypt
@@ -29,12 +30,7 @@ from has_python.jscrypt_encode_for_python import js_decrypt, js_encrypt
 logging.getLogger("beemapi.graphenerpc").setLevel(logging.ERROR)
 logging.getLogger("beemapi.node").setLevel(logging.ERROR)
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
-    encoding="utf-8",
-    stream=sys.stdout,
-)
+logger = logging.getLogger(__name__)
 
 
 load_dotenv()
@@ -56,12 +52,17 @@ class HiveVerificationFailure(Exception):
     pass
 
 
+class HASResult(Exception):
+    pass
+
+
 class CmdType(str, Enum):
     connected = "connected"
     auth_req = "auth_req"
     challenge_req = "challenge_req"
     challenge_wait = "challenge_wait"
     challenge_ack = "challenge_ack"
+    challenge_err = "challenge_err"
     auth_wait = "auth_wait"
     auth_ack = "auth_ack"
     auth_nack = "auth_nack"
@@ -145,14 +146,14 @@ class AuthDataHAS(BaseModel):
         return js_encrypt(self.bytes, str_bytes(self.auth_key))
 
 
-class _AuthReqHAS(HASMessage):
+class _AuthChallReqHAS(HASMessage):
     account: str
     data: str
     token: UUID | None
     encrypted_auth_key: str | None
 
 
-class AuthReqHAS(HASMessage):
+class AuthChallReqHAS(HASMessage):
     account: str
     data: str
     token: UUID | None
@@ -228,6 +229,14 @@ class AuthAckHAS(HASMessage):
 
     def validate_hive(self):
         validate_hive_auth_req(self.uuid, self.data)
+
+
+class ChallengeAckHAS(HASMessage):
+    uuid: UUID
+    data: str
+
+    def validate_hive(self):
+        validate_hive_sign_req(self.uuid, self.data)
 
 
 class AuthNackHAS(HASMessage):
@@ -329,7 +338,7 @@ class ChallengeReqHAS(HASMessage):
         )
 
 
-class AuthSignObject(AuthDataHAS, _AuthReqHAS):
+class AuthSignObject(AuthDataHAS, _AuthChallReqHAS):
     timestamp: datetime = datetime.now(tz=timezone.utc)
 
     def __init__(
@@ -345,8 +354,6 @@ class AuthSignObject(AuthDataHAS, _AuthReqHAS):
         Builds an `auth_req` with a challenge.
         If token is given needs to use the previous `auth_key`
         """
-        if token:
-            auth_key = token.token
         timestamp = datetime.now(tz=timezone.utc).timestamp()
         challenge = ChallengeHAS(
             key_type=key_type,
@@ -356,16 +363,20 @@ class AuthSignObject(AuthDataHAS, _AuthReqHAS):
                 "message": challenge_message,
             },
         )
+        cmd = CmdType.auth_req
+        if token:
+            auth_key = token.auth_key
+            cmd = CmdType.sign_req
         auth_data = AuthDataHAS(
             challenge=challenge,
             auth_key=auth_key,
         )
-        auth_req = _AuthReqHAS(
-            cmd=CmdType.auth_req,
+        auth_chall_req = _AuthChallReqHAS(
+            cmd=cmd,
             account=acc_name,
             data=auth_data.encrypted_b64,
         )
-        all_data = auth_data.dict(exclude_unset=True) | auth_req.dict(
+        all_data = auth_data.dict(exclude_unset=True) | auth_chall_req.dict(
             exclude_unset=True
         )
         if use_pksa_key:
@@ -376,9 +387,9 @@ class AuthSignObject(AuthDataHAS, _AuthReqHAS):
         super().__init__(**all_data)
 
     @property
-    def auth_req(self) -> AuthReqHAS:
+    def auth_req(self) -> AuthChallReqHAS:
         """Returns only an auth_req"""
-        auth_req = AuthReqHAS(
+        auth_req = AuthChallReqHAS(
             cmd=CmdType.auth_req,
             auth_key=self.encrypted_auth_key,
             account=self.account,
@@ -419,8 +430,10 @@ def purge_a_list(any_list: List):
             if expires_in < timedelta(seconds=0):
                 delete_list.append(i)
             else:
-                logging.debug(f"Expires in {expires_in} | {item}")
+                logger.info(f"Expires in {expires_in} | {item}")
     if delete_list:
+        for item in delete_list:
+            logging.info(f"Request expired: {any_list[item]}")
         any_list = [i for j, i in enumerate(any_list) if j not in delete_list]
     return any_list
 
@@ -476,10 +489,28 @@ class AllLists(BaseModel):
 
 
 def validate_hive_sign_req(uuid: UUID, data: str):
+    """Can't be sure which waiting request this is for"""
+
     sign_wait = GLOBAL_LISTS.find_wait(uuid)
+    if not sign_wait:
+        raise
     GLOBAL_LISTS.del_wait(sign_wait)
-    # This is harder than it looks as we have to figure out which
-    # request is giving the error.
+    data_bytes = data.encode("utf-8")
+    for auth_object in GLOBAL_LISTS.auth_list:
+        try:
+            data_string = js_decrypt(
+                data_bytes, str_bytes(auth_object.auth_key)
+            ).decode(encoding="utf-8")
+            decoded_data = json.loads(data_string)
+            decoded_challenge = ChallengeHAS.parse_obj(decoded_data)
+            verification = check_hive_signature(
+                decoded_challenge, auth_object, decoded_data, data_string
+            )
+
+        except Exception as ex:
+            logger.error(ex)
+
+    pass
 
 
 def validate_hive_auth_req(uuid: UUID, data: str):
@@ -487,6 +518,8 @@ def validate_hive_auth_req(uuid: UUID, data: str):
     or validates a challenge on its own"""
     # Find the matching index of ACK_WAIT_LIST
     auth_wait = GLOBAL_LISTS.find_wait(uuid)
+    if not auth_wait:
+        raise
     GLOBAL_LISTS.del_wait(auth_wait)
 
     if auth_wait.account:
@@ -494,22 +527,18 @@ def validate_hive_auth_req(uuid: UUID, data: str):
         GLOBAL_LISTS.del_auth(auth_object)
         if auth_object and auth_object.account != auth_wait.account:
             raise HiveVerificationFailure()
-        keys_to_use = [auth_object.auth_key]
-    else:
-        keys_to_use = [a.auth_key for a in GLOBAL_LISTS.auth_list]
-        # BAD HACK NEED TO FIX
-        auth_object = GLOBAL_LISTS.auth_list[0]
-    for auth_key in keys_to_use:
+        auth_key = auth_object.auth_key
         data_bytes = data.encode("utf-8")
         data_string = js_decrypt(data_bytes, str_bytes(auth_key)).decode(
-            encoding="utf-8", errors="ignore"
+            encoding="utf-8"
         )
         # If AuthNack the datastring is a UUID:
         try:
             check_uuid = UUID(data_string)
             if check_uuid == uuid:
-                logging.info("Integrity Check good: Authorisation rejected")
+                logger.info("Integrity Check good: Authorisation rejected")
                 return
+                # raise HASResult("auth_nack")
         except ValueError:
             decoded_data = json.loads(data_string)
             if decoded_data.get("token"):
@@ -518,31 +547,42 @@ def validate_hive_auth_req(uuid: UUID, data: str):
                 )
             else:
                 decoded_challenge = ChallengeHAS.parse_obj(decoded_data)
-            signed_answer = SignedAnswer(
-                result=decoded_challenge.challenge,
-                request_id=1,
-                publicKey=decoded_challenge.pubkey,
-                data=SignedAnswerData(
-                    _type="HAS",
-                    username=auth_object.account,
-                    message=auth_object.challenge.challenge,
-                    method=auth_object.challenge.key_type,
-                    key=auth_object.challenge.key_type,
-                ),
+            verification = check_hive_signature(
+                decoded_challenge, auth_object, decoded_data, data_string
             )
 
-        if decoded_data.get("token"):
-            auth_ack_data = AuthAckDataHAS.parse_raw(data_string)
-            logging.info(f"Token: {auth_ack_data.token}")
-            verification = validate_hivekeychain_ans(signed_answer)
-            if verification.success:
-                valid_token = ValidToken(
-                    acc_name=verification.acc_name,
-                    token=auth_ack_data.token,
-                    expire=auth_ack_data.expire,
-                    auth_key=auth_object.auth_key,
-                )
-                GLOBAL_LISTS.token_list.append(valid_token)
+
+def check_hive_signature(
+    decoded_challenge: dict,
+    auth_object: AuthSignObject,
+    decoded_data: dict,
+    data_string: str,
+) -> SignedAnswerVerification:
+    signed_answer = SignedAnswer(
+        result=decoded_challenge.challenge,
+        request_id=1,
+        publicKey=decoded_challenge.pubkey,
+        data=SignedAnswerData(
+            _type="HAS",
+            username=auth_object.account,
+            message=auth_object.challenge.challenge,
+            method=auth_object.challenge.key_type,
+            key=auth_object.challenge.key_type,
+        ),
+    )
+    verification = validate_hivekeychain_ans(signed_answer)
+    if decoded_data.get("token"):
+        auth_ack_data = AuthAckDataHAS.parse_raw(data_string)
+        logger.info(f"Token: {auth_ack_data.token}")
+        if verification.success:
+            valid_token = ValidToken(
+                acc_name=verification.acc_name,
+                token=auth_ack_data.token,
+                expire=auth_ack_data.expire,
+                auth_key=auth_object.auth_key,
+            )
+            GLOBAL_LISTS.token_list.append(valid_token)
+    return verification
 
 
 async def build_auth_req_challenge(
@@ -568,7 +608,7 @@ async def build_auth_req_challenge(
         challenge=challenge,
         auth_key=uuid4(),  # UUID("37c3b377-cf91-44a3-9e21-6af5b8773bf3"), # hard coded
     )
-    auth_req = _AuthReqHAS(
+    auth_req = _AuthChallReqHAS(
         cmd=CmdType.auth_req,
         account=acc_name,
         data=auth_data.encrypted_b64,
@@ -589,13 +629,13 @@ async def socket_listen(has_socket):
         try:
             msg = await has_socket.recv()
             cmd = HASMessage.parse_raw(msg)
-            logging.info(f"<------ Recivied: {cmd}")
-            logging.info(msg)
+            logger.info(f"<------ Recivied: {cmd}")
+            logger.debug(msg)
             match cmd.cmd:
                 case CmdType.connected:
                     processed = ConnectedHAS.parse_raw(msg)
                     processed.socketid
-                    logging.info(processed)
+                    logger.info(processed)
                 case CmdType.auth_wait:
                     auth_wait = HASWait.parse_raw(msg)
                     # Display QR Code - move this code to HASWait class
@@ -611,63 +651,63 @@ async def socket_listen(has_socket):
                     if not auth_wait.account == "v4vapp.dev":
                         img.show()
                     GLOBAL_LISTS.wait_list.append(auth_wait)
-                    logging.info(auth_wait)
+                    logger.info(auth_wait)
                 case CmdType.sign_wait:
                     sign_wait = HASWait.parse_raw(msg)
-                    logging.info(
+                    logger.info(
                         f"****** Alert User to authorise transaction "
                         f"{sign_wait.uuid}"
                     )
                     GLOBAL_LISTS.wait_list.append(sign_wait)
                 case CmdType.challenge_wait:
                     challenge_wait = HASWait.parse_raw(msg)
-                    logging.info(
+                    logger.info(
                         f"****** Alert User to authorise challenge   "
                         f"{challenge_wait.uuid}"
                     )
                     GLOBAL_LISTS.wait_list.append(challenge_wait)
                 case CmdType.auth_ack:
                     auth_ack = AuthAckHAS.parse_raw(msg)
-                    logging.debug(auth_ack)
+                    logger.debug(auth_ack)
                     auth_ack.validate_hive()
                 case CmdType.challenge_ack:
-                    challenge_ack = AuthAckHAS.parse_raw(msg)
-                    logging.debug(challenge_ack)
+                    challenge_ack = ChallengeAckHAS.parse_raw(msg)
+                    logger.debug(challenge_ack)
                     challenge_ack.validate_hive()
                 case CmdType.auth_nack:
                     auth_nack = AuthNackHAS.parse_raw(msg)
-                    logging.debug(auth_nack)
+                    logger.debug(auth_nack)
                     auth_nack.validate_hive()
                 case CmdType.sign_ack:
                     sign_ack = SignAckHAS.parse_raw(msg)
                     if sign_ack.broadcast:
-                        logging.info(f"Transaction broadcast to Hive: {sign_ack.data}")
+                        logger.info(f"Transaction broadcast to Hive: {sign_ack.data}")
                 case CmdType.sign_nack:
                     sign_nack = SignNackHAS.parse_raw(msg)
                     sign_nack.validate_hive()
                 case CmdType.sign_err:
-                    logging.info("Sign Error")
+                    logger.info("Sign Error")
                     sign_err = SignErrHAS.parse_raw(msg)
                     sign_err.validate_hive()
-                    logging.info(f"Sign Error: {sign_err.error}")
+                    logger.info(f"Sign Error: {sign_err.error}")
 
             if has_socket.closed:
                 break
 
         except (ValidationError, KeyError) as ex:
             if msg:
-                logging.error(f"Message received: {msg}")
-            logging.error(ex)
+                logger.error(f"Message received: {msg}")
+            logger.error(ex)
             pass
         except (
             websockets.exceptions.ConnectionClosedError,
             ConnectionError,
             ConnectionResetError,
         ) as ex:
-            logging.warning(ex)
+            logger.warning(ex)
             break
         except Exception as ex:
-            logging.exception(ex)
+            logger.exception(ex)
             raise
 
 
@@ -676,26 +716,26 @@ async def execute_tasks(has_socket):
     while True:
         try:
             msg: HASMessage = await TASK_QUEUE.get()
-            logging.info(msg.json(exclude_none=True, models_as_dict=True))
+            logger.info(msg.json(exclude_none=True, models_as_dict=True))
             await has_socket.send(msg.json(exclude_none=True))
-            logging.info(f"------> Sent:   {msg.cmd}")
+            logger.info(f"------> Sent:   {msg.cmd}")
             await asyncio.sleep(0.1)
         except (
             websockets.exceptions.ConnectionClosedError,
             ConnectionError,
             ConnectionResetError,
         ) as ex:
-            logging.warning(ex)
-            logging.info("Putting the msg back int the Queue")
+            logger.warning(ex)
+            logger.info("Putting the msg back int the Queue")
             await TASK_QUEUE.put(msg)
             break
         except Exception as ex:
-            logging.exception(ex)
+            logger.exception(ex)
             raise
 
 
 async def global_list_purge(
-    quit_after_waiting: bool = False, other_tasks: asyncio.Task = None
+    quit_after_waiting: bool = False, other_tasks: asyncio.TaskGroup = None
 ) -> bool:
     """
     Check the global list for expired waits.
@@ -703,14 +743,18 @@ async def global_list_purge(
     this will quit and return True
     """
     await asyncio.sleep(10)
+    checks = 0
     while True:
         await asyncio.sleep(1)
         waiting, tokens = GLOBAL_LISTS.purge_expired()
-        if quit_after_waiting and waiting == 0:
+        if waiting == 0:
+            checks += 1
+        else:
+            checks = 0
+        if checks > 2 and quit_after_waiting and waiting == 0:
             if other_tasks:
-                other_tasks.cancel()
+                [task.cancel() for task in other_tasks._tasks]
             return True
-            raise asyncio.CancelledError
         await asyncio.sleep(9)
 
 
@@ -721,41 +765,48 @@ async def manage_websocket():
                 async with asyncio.TaskGroup() as tg:
                     listen = tg.create_task(socket_listen(has_socket))
                     execute = tg.create_task(execute_tasks(has_socket))
-                    logging.info(f"Finished Listening {listen}")
-                    logging.info(f"Finished Exectuing {execute}")
+                    logger.info(f"Finished Listening {listen}")
+                    logger.info(f"Finished Exectuing {execute}")
             except (
                 websockets.exceptions.ConnectionClosedError,
                 ConnectionError,
                 ConnectionResetError,
             ) as ex:
-                logging.warning(ex)
+                logger.warning(ex)
                 break
             except Exception as ex:
-                logging.exception(ex)
+                logger.exception(ex)
                 break
 
 
-async def main_listen_send_loop():
-    """Run the main parts for listening to and sending from websockets"""
+async def main_listen_send_loop(tasks: List[Awaitable]):
+    """Run the main parts for listening to and sending from websockets
+    If the main code ends, raises asyncio.CancelledError"""
     async with asyncio.TaskGroup() as tg:
         send_listen = tg.create_task(manage_websocket(), name="send_listen")
+        for task in tasks:
+            tg.create_task(task)
         time_to_end = tg.create_task(
-            global_list_purge(quit_after_waiting=True, other_tasks=send_listen)
+            global_list_purge(quit_after_waiting=True, other_tasks=tg)
         )
     if time_to_end.done():
-        send_listen.cancel()
+        logging.info("All Done")
 
 
 async def main_testing_loop():
-    async with asyncio.TaskGroup() as tg:
-        tg.create_task(manage_websocket())
-        tg.create_task(test_send_auth_req())
-        tg.create_task(test_challenge())
-        # tg.create_task(test_send_transaction())
-        tg.create_task(global_list_purge())
+    try:
+        await main_listen_send_loop(
+            tasks=[
+                test_send_auth_req(),
+                test_challenge(),
+                test_send_transaction(),
+            ]
+        )
+    except Exception as ex:
+        logging.info(ex)
 
 
-target = "v4vapp.dev"
+target = "v4vapp"
 
 
 async def test_send_auth_req():
@@ -772,7 +823,6 @@ async def test_send_auth_req():
             use_pksa_key=use_pksa_key,
         )
         GLOBAL_LISTS.auth_list.append(auth_object)
-        temp = auth_object.auth_req
         await TASK_QUEUE.put(auth_object.auth_req)
 
 
@@ -780,7 +830,7 @@ async def test_send_transaction():
     await asyncio.sleep(20)
     test_account = target
     # find valid Token
-    for i in range(100):
+    for i in range(3):
         await asyncio.sleep(5)
         valid_token = GLOBAL_LISTS.find_token_by_account(test_account)
         if valid_token:
@@ -805,7 +855,7 @@ async def test_send_transaction():
                 token=valid_token,
                 data=sign_data.encrypted_b64(valid_token.auth_key),
             )
-            logging.info(sign_req)
+            logger.info(sign_req)
             GLOBAL_LISTS.auth_list.append(sign_req)
             await TASK_QUEUE.put(sign_req)
             await asyncio.sleep(60 + i * 10)
@@ -817,7 +867,7 @@ async def test_challenge():
     while True:
         valid_token = GLOBAL_LISTS.find_token_by_account(target)
         challenge_message = "who let the dogs out?"
-        key_type = KeyType.posting
+        key_type = KeyType.active
         if valid_token:
             auth_sign = AuthSignObject(
                 acc_name=target,
@@ -844,4 +894,10 @@ TASK_QUEUE = asyncio.Queue()
 # VALID_TOKEN_LIST: List[ValidToken] = []
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
+        encoding="utf-8",
+        stream=sys.stdout,
+    )
     asyncio.run(main_testing_loop())

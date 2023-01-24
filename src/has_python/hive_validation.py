@@ -52,6 +52,7 @@ def validate_hivekeychain_ans(signed_answer: SignedAnswer) -> SignedAnswerVerifi
     enc_msg = signed_answer.data.message  # ans["data"]["message"]
     signature = signed_answer.result  # ans["result"]
 
+    mtime = json.loads(enc_msg)["timestamp"]
     msgkey = verify_message(enc_msg, unhexlify(signature))
     pk = PublicKey(hexlify(msgkey).decode("ascii"))
     if str(pk) == str(pubkey):
@@ -62,7 +63,6 @@ def validate_hivekeychain_ans(signed_answer: SignedAnswer) -> SignedAnswerVerifi
             match = match or pubkey_s in key
         if match:
             logging.info(f"{acc_name} Matches public key from Hive")
-            mtime = json.loads(enc_msg)["timestamp"]
             elapsed_time = datetime.now(tz=timezone.utc).timestamp() - mtime
             if elapsed_time < AUTHENTICATION_TIME_LIMIT:
                 logging.info(f"{acc_name} SUCCESS: in {elapsed_time} seconds")
@@ -81,7 +81,8 @@ def validate_hivekeychain_ans(signed_answer: SignedAnswer) -> SignedAnswerVerifi
                     elapsed_time=elapsed_time,
                 )
     else:
-        logging.info(f"{acc_name} ERROR: message was signed with a different key")
+        elapsed_time = datetime.now(tz=timezone.utc).timestamp() - mtime
+        logging.warning(f"{acc_name} ERROR: message was signed with a different key")
         return SignedAnswerVerification(
             acc_name=acc_name, success=False, pubkey=pubkey_s, elapsed_time=elapsed_time
         )

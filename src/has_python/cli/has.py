@@ -3,7 +3,6 @@ import logging
 import sys
 
 import typer
-from websockets import connect as ws_connect
 
 from has_python.has_lib2 import (
     GLOBAL_LISTS,
@@ -13,8 +12,15 @@ from has_python.has_lib2 import (
     main_listen_send_loop,
 )
 
-app = typer.Typer()
+logging.basicConfig(
+    level=logging.ERROR,
+    format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
+    encoding="utf-8",
+    stream=sys.stderr,
+)
 
+app = typer.Typer()
+logging.getLogger("has_python.has_lib2").setLevel(logging.ERROR)
 logging.getLogger("beemapi.graphenerpc").setLevel(logging.ERROR)
 logging.getLogger("beemapi.node").setLevel(logging.ERROR)
 
@@ -40,9 +46,11 @@ async def connect_and_challenge(
         use_pksa_key=use_pksa_key,
     )
     GLOBAL_LISTS.auth_list.append(auth_object)
+    tasks = [
+        TASK_QUEUE.put(auth_object.auth_req)
+    ]
     async with asyncio.TaskGroup() as tg:
-        tg.create_task(main_listen_send_loop())
-        tg.create_task(TASK_QUEUE.put(auth_object.auth_req))
+        tg.create_task(main_listen_send_loop(tasks=tasks))
 
     # print(GLOBAL_LISTS.token_list[0])
 
@@ -59,12 +67,6 @@ def connect(
     """Start a new connection to
     Hive Authentication Services (HAS)
     from the Hive Account ACC_Name"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s",
-        encoding="utf-8",
-        stream=sys.stderr,
-    )
 
     try:
         asyncio.run(

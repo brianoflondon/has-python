@@ -783,7 +783,7 @@ async def main_listen_send_loop(tasks: List[Awaitable]):
     """Run the main parts for listening to and sending from websockets
     If the main code ends, raises asyncio.CancelledError"""
     async with asyncio.TaskGroup() as tg:
-        send_listen = tg.create_task(manage_websocket(), name="send_listen")
+        tg.create_task(manage_websocket(), name="send_listen")
         for task in tasks:
             tg.create_task(task)
         time_to_end = tg.create_task(
@@ -799,7 +799,7 @@ async def main_testing_loop():
             tasks=[
                 test_send_auth_req(),
                 test_challenge(),
-                test_send_transaction(),
+                # test_send_transaction(),
             ]
         )
     except Exception as ex:

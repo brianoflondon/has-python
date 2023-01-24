@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "has-python"
-version = "0.1.0"
+version = "0.2.0"
 description = "A very basic demo to show Hive Authentication Service (HAS) in Python"
 authors = ["Brian of London (Dot) <brian@v4v.app>"]
 license = "MIT"
@@ -21,11 +21,13 @@ pydantic = "^1.10.4"
 beem = {git = "https://gitlab.syncad.com/hive/beem.git"}
 python-dotenv = "^0.21.0"
 typer = "^0.7.0"
+lighthive = "^0.4.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^22.12.0"
 pytest = "^7.2.1"
 flake8 = "^6.0.0"
+pytest-asyncio = "^0.20.3"
 
 [build-system]
 requires = ["poetry-core"]
@@ -35,6 +37,7 @@ build-backend = "poetry.core.masonry.api"
 testpaths = [
     "tests",
 ]
+log_cli = true
 log_level = "INFO"
-log_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
+log_format = "%(asctime)s %(levelname)-8s %(module)-14s %(lineno) 5d : %(message)s"
 log_date_format = "%Y-%m-%d %H:%M:%S"

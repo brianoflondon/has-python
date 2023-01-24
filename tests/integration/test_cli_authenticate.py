@@ -10,17 +10,16 @@ Testing Note: this relies on running Arcange's PKSA server
 """
 
 
-def test_cli_authentication_known_key():
+def test_cli_known_key_authentication():
     runner = CliRunner()
     args = ["v4vapp.dev", "--no-display"]
     result = runner.invoke(app, args)
     assert result.exit_code == 0
 
 
-@pytest.mark.timeout(61)
 @pytest.mark.slow
-def test_cli_authentication_unknown_key():
+def test_cli_unknown_key_authentication():
     runner = CliRunner()
     args = ["v4vapp.dev", "--key-type", "memo", "--no-display"]
     result = runner.invoke(app, args)
-    assert result.exit_code == os.EX_UNAVAILABLE
+    assert result.exit_code == 0

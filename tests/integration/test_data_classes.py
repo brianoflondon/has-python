@@ -4,7 +4,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from has_python.has_lib2 import AuthSignObject, CmdType, HASApp, HASMessage, HASWait
+from has_python.has_lib import AuthSignObject, CmdType, HASApp, HASMessage, HASWait
 
 
 @pytest.mark.asyncio

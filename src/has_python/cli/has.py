@@ -4,7 +4,7 @@ import sys
 
 import typer
 
-from has_python.has_lib2 import (
+from has_python.has_lib import (
     GLOBAL_LISTS,
     TASK_QUEUE,
     AuthSignObject,
@@ -51,9 +51,9 @@ async def connect_and_challenge(
     ]
     async with asyncio.TaskGroup() as tg:
         tg.create_task(main_listen_send_loop(tasks=tasks))
-
-    # print(GLOBAL_LISTS.token_list[0])
-
+    if GLOBAL_LISTS.token_list:
+        print(f"Token: {GLOBAL_LISTS.token_list[0].token}")
+        print(f"Auth_key: {GLOBAL_LISTS.token_list[0].auth_key}")
 
 @app.command()
 def connect(
